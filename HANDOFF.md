@@ -10,14 +10,13 @@ Based on: https://github.com/anthropics/claude-desktop-buddy
 ## Hardware currently in use
 - **Primary: CYD** (Cheap Yellow Display / ESP32-2432S028) — 2.8" ILI9341 240×320 + XPT2046 resistive touch, RGB LEDs
 - **Secondary: M5StickC original** — 80×160 LCD, BLE, two physical buttons
-
-Both flashed with BLE firmware, pair with Claude Desktop on macOS/Windows.
+- **New board (unresolved):** A second CYD/BYD variant, also labelled 240×320, 2.8". Physically different panel mounting — needs different rotation + layout redesign. See "New Board Issue" below.
 
 ---
 
 ## Current state
 
-### What's working
+### What's working (original CYD board)
 - BLE pairing with Claude Desktop (Nordic UART Service, `Claude-XXYY` advertising name)
 - CYD: dark sci-fi HUD — animated ASCII cat with pulsing glow rings, state-reactive neon accent color (cyan/green/amber/gray), corner-bracket panels, glowing separators, fading activity feed, 3-tab navigation (swipe or tap)
 - M5StickC: landscape buddy with cat animation and button A/B approve/deny
@@ -36,6 +35,40 @@ Three-tier render: full redraw only on state/tab change → `updateBuddyText()` 
 
 ### Open question
 Claude Desktop only sets `running > 0` for tool-assisted sessions, not plain chat. The LOG tab on the CYD shows every raw BLE line — a photo of it during active use will reveal exactly what the user's Claude Desktop version sends. Once known, `parseLine()` can be updated if needed.
+
+---
+
+## New Board Issue (unresolved)
+
+A second CYD/BYD variant (also 2.8", also labelled 240×320) has its display panel physically mounted at 90° relative to the original CYD. The current firmware (`setRotation(0)`) shows portrait correctly on the original board but landscape on the new board.
+
+**Rotation test results on new board:**
+| setRotation | Visual result |
+|-------------|--------------|
+| 0 | Landscape (sideways) |
+| 1 | Portrait upside-down, bottom 25% of screen unused |
+| 2 | Landscape (other direction) |
+| 3 | Portrait right-side-up orientation, but bottom ~25% of UI content clipped |
+
+**Root cause:** Rotations 1 and 3 swap the logical coordinate space to 320w×240h (landscape logical). The layout is hardcoded for 240w×320h (portrait logical). Content drawn at y > 239 is clipped, and x > 239 leaves 80px unused. So neither rotation 1 nor 3 fills the screen correctly with the current layout.
+
+**Fix needed:** For the new board, use `setRotation(3)` + redesign the entire layout using 320 logical width × 240 logical height. Every hardcoded pixel coordinate in `drawBuddy()`, `drawStats()`, `drawLog()`, `drawAttn()`, `updateBuddyText()`, `pushCatSprite()`, sprite dimensions, etc. must be updated. Consider a compile-time `#define NEW_BOARD` flag to keep both layouts.
+
+**Current firmware state:** `setRotation(0)` — correct for original CYD, wrong for new board.
+
+---
+
+## To flash original CYD board
+Firmware is already set to `setRotation(0)` — just flash:
+```bash
+export PATH="$HOME/.platformio/penv/bin:$PATH"
+sudo chmod 666 /dev/ttyUSB0
+cd firmware-cyd
+pio run --target upload --upload-port /dev/ttyUSB0
+```
+
+## To flash new board variant (once layout redesign is done)
+Change both `setRotation(0)` → `setRotation(3)` calls in `setup()` (tft and ts), then redesign layout for 320w×240h before flashing. Not yet implemented.
 
 ---
 
@@ -105,8 +138,9 @@ Claude Code CLI
 
 ## Next steps (in priority order)
 
-1. **Push to GitHub** — user is creating a repo; push current state
+1. **New board layout redesign** — fix coordinate mismatch for new CYD/BYD variant: use `setRotation(3)` + redesign all draw coordinates for 320w×240h logical space (see "New Board Issue" above)
 2. **Verify permission flow end-to-end** — confirm a tool approval from the CYD actually unblocks Claude Desktop
-3. **Protocol investigation** — use the LOG tab to photograph what Claude Desktop sends during active use, identify if `running`/`waiting` are used for regular chat
-4. **Auto-start on USB** (Linux) — udev rule to start `bridge.py` when the M5StickC is plugged in
-5. **GIF character support** (optional) — the upstream repo's folder-push protocol for streaming custom animated characters over BLE
+3. **Protocol investigation** — use the LOG tab to photograph what Claude Desktop sends during active use
+4. **Push updated firmware to GitHub** — current firmware-cyd/src/main.cpp not yet pushed to colery/homeai-cb
+5. **Auto-start on USB** (Linux) — udev rule to start `bridge.py` when M5StickC is plugged in
+6. **GIF character support** (optional) — upstream repo's folder-push protocol for streaming custom animated characters over BLE
