@@ -1,0 +1,11 @@
+# PlatformIO build artifacts
+.pio/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state
+/tmp/claude_buddy_state.json
+*.log

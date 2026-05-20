@@ -1,0 +1,838 @@
+/*
+ * Claude Buddy — CYD (ESP32-2432S028)  240×320 portrait
+ *
+ * Dark sci-fi HUD aesthetic:
+ *   Deep navy background · state-reactive neon accents · pulsing glow rings
+ *   around the cat · corner brackets · glowing separator lines
+ *
+ * Flicker strategy:
+ *   - Full-screen redraws only on state/tab changes
+ *   - Data updates use updateBuddyText() (targeted small fills, no screen clear)
+ *   - Cat + glow live in a TFT_eSprite → pushed atomically, zero blank-frame flash
+ *   - startWrite/endWrite wraps every render path (single SPI transaction)
+ *   - DMA enabled, SPI at 40 MHz (stable ceiling for GPIO-matrix routing)
+ *
+ * Layout:
+ *   [  0- 17]  Top bar    — device · time · BLE dot
+ *   [ 18]      Glow line
+ *   [ 19-166]  Hero       — cat sprite with glow rings + state label
+ *   [167]      Glow line
+ *   [168-192]  Stat row   — r/w · tokens · state badge
+ *   [193]      Glow line
+ *   [194-258]  Feed       — 5 recent tool entries, fading brightness
+ *   [259]      Glow line
+ *   [260-290]  Secondary  — beat indicator · approval bar
+ *   [291]      Glow line
+ *   [292-319]  Tab bar    — minimal underline style
+ *
+ * Touch: swipe L/R to change tab; tap tab bar to jump.
+ * ATTENTION overlay: tap RIGHT half = Allow, LEFT half = Don't Allow.
+ */
+
+#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <XPT2046_Touchscreen.h>
+#include <ArduinoJson.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <esp_mac.h>
+#include <time.h>
+
+// ── Hardware ───────────────────────────────────────────────────────────────
+#define LED_RED    4
+#define LED_GREEN 16
+#define LED_BLUE  17
+#define BL_PIN    21
+#define TOUCH_CS  33
+#define TOUCH_IRQ 36
+#define TOUCH_CLK 25
+#define TOUCH_MOSI 32
+#define TOUCH_MISO 39
+
+// ── NUS UUIDs ─────────────────────────────────────────────────────────────
+#define NUS_SVC "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+#define NUS_RX  "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+#define NUS_TX  "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+
+// ── Palette ────────────────────────────────────────────────────────────────
+#define BG      0x0821   // deep navy (background)
+#define BG2     0x1042   // slightly lighter (top bar)
+#define BG3     0x0010   // very dark (code blocks)
+#define WHITE   0xFFFF
+#define DIM1    0x2104
+#define DIM2    0x4208
+#define DIM3    0x630C
+
+// State accent colors [SLEEP, IDLE, BUSY, ATTN]
+static const uint16_t ACC[] = { 0x4208, 0x07FF, 0x07E0, 0xFDA0 };
+// Dim version of accent (for secondary text in that state)
+static const uint16_t ACC2[]= { 0x2104, 0x0398, 0x0260, 0x7940 };
+
+// ── Touch calibration ─────────────────────────────────────────────────────
+#define TCH_X_MIN   230
+#define TCH_X_MAX  3900
+#define TCH_Y_MIN   230
+#define TCH_Y_MAX  3900
+#define TCH_SWAP_XY false
+#define TCH_FLIP_X  false
+#define TCH_FLIP_Y  false
+
+static void mapTouch(int16_t rx, int16_t ry, int* sx, int* sy) {
+  int x = TCH_FLIP_X ? (TCH_X_MAX-(rx-TCH_X_MIN)) : rx;
+  int y = TCH_FLIP_Y ? (TCH_Y_MAX-(ry-TCH_Y_MIN)) : ry;
+  if (TCH_SWAP_XY) { int t=x; x=y; y=t; }
+  *sx = constrain(map(x,TCH_X_MIN,TCH_X_MAX,0,239),0,239);
+  *sy = constrain(map(y,TCH_Y_MIN,TCH_Y_MAX,0,319),0,319);
+}
+
+// ── BLE ────────────────────────────────────────────────────────────────────
+#define BLE_BUF 4096
+static uint8_t           ring[BLE_BUF];
+static volatile uint16_t rH=0,rT=0;
+static BLECharacteristic* pTx=nullptr;
+static volatile bool bleConn=false,bleSec=false,showKey=false;
+static volatile uint32_t connAt=0,bleKey=0;
+static char devName[20]="Claude-????";
+
+static void rPush(const char* d,size_t n){for(size_t i=0;i<n;i++){uint16_t nx=(rH+1)%BLE_BUF;if(nx!=rT){ring[rH]=(uint8_t)d[i];rH=nx;}}}
+static int  rAvail(){return(rH+BLE_BUF-rT)%BLE_BUF;}
+static char rRead(){char c=(char)ring[rT];rT=(rT+1)%BLE_BUF;return c;}
+static void bleTx(const char* s){
+  if(!bleConn||!bleSec||!pTx)return;
+  char b[512];size_t n=snprintf(b,sizeof(b),"%s\n",s);
+  for(size_t o=0;o<n;o+=20){size_t k=n-o<20?n-o:20;pTx->setValue((uint8_t*)(b+o),k);pTx->notify();}
+}
+
+class SecCB:public BLESecurityCallbacks{
+  uint32_t onPassKeyRequest()override{return 0;}
+  void onPassKeyNotify(uint32_t k)override{bleKey=k;showKey=true;}
+  bool onConfirmPIN(uint32_t)override{return true;}
+  bool onSecurityRequest()override{return true;}
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t c)override{if(c.success){bleSec=true;showKey=false;}}
+};
+class SrvCB:public BLEServerCallbacks{
+  void onConnect(BLEServer*)override{bleConn=true;bleSec=false;showKey=false;connAt=millis();}
+  void onDisconnect(BLEServer*)override{bleConn=false;bleSec=false;showKey=false;BLEDevice::startAdvertising();}
+};
+class RxCB:public BLECharacteristicCallbacks{
+  void onWrite(BLECharacteristic* ch)override{std::string v=ch->getValue();rPush(v.c_str(),v.size());}
+};
+
+// ── State ──────────────────────────────────────────────────────────────────
+struct Buddy{
+  bool conn=false; uint8_t running=0,waiting=0;
+  uint32_t tokToday=0,tokTotal=0,lastBeat=0;
+  char msg[64]=""; char entries[5][52]={}; uint8_t nEntries=0;
+  char pId[40]="",pTool[20]="",pHint[44]="";
+  uint16_t approvals=0,denials=0;
+  uint32_t epoch=0,epochAt=0; int32_t tzOff=0;
+} g;
+enum BS{S_SLEEP,S_IDLE,S_BUSY,S_ATTN};
+BS gState=S_SLEEP;
+
+// ── Log ────────────────────────────────────────────────────────────────────
+#define LOG_N 50
+#define LOG_W 37
+#define LOG_VISIBLE 29
+static char log_buf[LOG_N][LOG_W+1];
+static int logI=0,logScroll=0;
+static void logLine(const char* s){strncpy(log_buf[logI],s,LOG_W);log_buf[logI][LOG_W]=0;logI=(logI+1)%LOG_N;}
+
+// ── ASCII art ─────────────────────────────────────────────────────────────
+static const char* ART[4][2][3]={
+  {{"  /\\_/\\  ","  (-.-)z ","  > zzz< "},{"  /\\_/\\  ","  (-.-)Z ","  >z z z<"}},
+  {{"  /\\_/\\  ","  (o . o)","   > ^ < "},{"  /\\_/\\  ","  (- . -)","   > - < "}},
+  {{"  /\\_/\\  ","  (>.<)  ","  >[###]<"},{"  /\\_/\\  ","  (<.>)  ","  >[###]<"}},
+  {{"  /\\_/\\  ","  (O . O)","  >! ! !<"},{"  /\\_/\\  ","  (O . O)","  > ! ! <"}},
+};
+static const char* S_LBL[]={"SLEEPING","IDLE","WORKING","APPROVE?"};
+
+// ── Globals ───────────────────────────────────────────────────────────────
+static char lbuf[4096]; static int llen=0;
+static uint32_t lastLed=0; static uint8_t frame=0;
+static bool ledOn=false; static uint32_t turnEnd=0;
+
+enum Tab{TAB_BUDDY=0,TAB_STATS=1,TAB_LOG=2};
+static Tab curTab=TAB_BUDDY;
+static bool dirty=true,textDirty=false;
+struct SwipeTrk{int16_t sx,sy,ex,ey;uint32_t st;bool active,drag;BS startState;}swk;
+
+TFT_eSPI    tft;
+TFT_eSprite catSpr(&tft);
+SPIClass    tspi(HSPI);
+XPT2046_Touchscreen ts(TOUCH_CS,TOUCH_IRQ);
+
+// ── Hero sprite zone ───────────────────────────────────────────────────────
+#define SPR_X  0
+#define SPR_Y  19
+#define SPR_W  240
+#define SPR_H  148
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+static void fmtTok(char* o,size_t n,uint32_t t){
+  if(t>=1000000)snprintf(o,n,"%.1fM",t/1e6f);
+  else if(t>=1000)snprintf(o,n,"%.1fK",t/1e3f);
+  else snprintf(o,n,"%lu",t);
+}
+static void getTime(char* o){
+  if(!g.epoch){strcpy(o,"--:--");return;}
+  uint32_t s=g.epoch+(millis()-g.epochAt)/1000+g.tzOff;
+  snprintf(o,6,"%02lu:%02lu",(s%86400)/3600,(s%3600)/60);
+}
+// Dim an RGB565 color by dividing each channel by div
+static uint16_t dimC(uint16_t c,int div){
+  if(div<1)div=1;
+  uint16_t r=(c>>11)&0x1F, g=(c>>5)&0x3F, b=c&0x1F;
+  return(uint16_t)(((r/div)<<11)|((g/div)<<5)|(b/div));
+}
+// Three-line glowing separator: bright center + dim halo
+static void glowLine(int y,uint16_t col){
+  tft.drawFastHLine(0,y,240,col);
+  uint16_t d=dimC(col,4);
+  tft.drawFastHLine(0,y-1,240,d);
+  tft.drawFastHLine(0,y+1,240,d);
+}
+// Corner bracket decoration (L-shapes in four corners of a rect)
+static void cornerBrkt(int x,int y,int w,int h,int sz,uint16_t col){
+  tft.drawFastHLine(x,y,sz,col);   tft.drawFastVLine(x,y,sz,col);
+  tft.drawFastHLine(x+w-sz,y,sz,col); tft.drawFastVLine(x+w-1,y,sz,col);
+  tft.drawFastHLine(x,y+h-1,sz,col); tft.drawFastVLine(x,y+h-sz,sz,col);
+  tft.drawFastHLine(x+w-sz,y+h-1,sz,col); tft.drawFastVLine(x+w-1,y+h-sz,sz,col);
+}
+// Glow rings drawn into a sprite (radiates outward from cx,cy)
+static void spritGlow(TFT_eSprite* spr,int cx,int cy,uint16_t col,int pf){
+  uint8_t r5=(col>>11)&0x1F, g6=(col>>5)&0x3F, b5=col&0x1F;
+  // 7 rings, innermost brightest, pulsing offset of ±2px between frames
+  for(int i=0;i<7;i++){
+    int div=1<<(6-i);  // 64,32,16,8,4,2,1
+    uint16_t rc=(uint16_t)(((r5/div)<<11)|((g6/div)<<5)|(b5/div));
+    int rad=70-i*9+(pf?2:0);  // pulse by 2px between frames
+    if(rad>0) spr->drawCircle(cx,cy,rad,rc);
+  }
+}
+
+// ── State machine ──────────────────────────────────────────────────────────
+static void recompute(){
+  if(!g.conn||(millis()-g.lastBeat)>15000) gState=S_SLEEP;
+  else if(g.waiting>0) gState=S_ATTN;
+  else if(g.running>0) gState=S_BUSY;
+  else                  gState=S_IDLE;
+}
+
+// ── Cat sprite (hero zone, atomic push = no flicker) ─────────────────────
+static void pushCatSprite(){
+  uint16_t col=ACC[gState];
+  uint8_t  f=frame&1;
+  catSpr.fillSprite(BG);
+
+  // Corner brackets inside sprite
+  cornerBrkt(0,0,SPR_W,SPR_H,14,dimC(col,2));
+  cornerBrkt(2,2,SPR_W-4,SPR_H-4,10,dimC(col,4));
+
+  // Glow rings
+  spritGlow(&catSpr,120,70,col,f);
+
+  // Cat art: textSize 3, centered
+  catSpr.setTextSize(3); catSpr.setTextColor(col,BG);
+  for(int i=0;i<3;i++){
+    const char* ln=ART[gState][f][i];
+    int tw=strlen(ln)*18;
+    catSpr.setCursor((SPR_W-tw)/2, 22+i*28);
+    catSpr.print(ln);
+  }
+
+  // State label
+  catSpr.setTextSize(2); catSpr.setTextColor(col,BG);
+  const char* lbl=S_LBL[gState];
+  int lw=strlen(lbl)*12;
+  catSpr.setCursor((SPR_W-lw)/2,112);
+  catSpr.print(lbl);
+
+  // Small "ok:X no:X" tally, dim, bottom-right
+  char tally[16]; snprintf(tally,16,"ok:%u no:%u",g.approvals,g.denials);
+  catSpr.setTextSize(1); catSpr.setTextColor(ACC2[gState],BG);
+  catSpr.setCursor(SPR_W-strlen(tally)*6-4,134);
+  catSpr.print(tally);
+
+  catSpr.pushSprite(SPR_X,SPR_Y);
+}
+
+// ── Top bar (y=0-17) ──────────────────────────────────────────────────────
+static void drawTopBar(){
+  tft.fillRect(0,0,240,18,BG2);
+  tft.setTextSize(1);
+  // Device name left
+  tft.setTextColor(ACC[gState],BG2); tft.setCursor(4,5); tft.print(devName);
+  // Time center
+  char tim[6]; getTime(tim);
+  int tw=strlen(tim)*6; tft.setTextColor(DIM3,BG2); tft.setCursor((240-tw)/2,5); tft.print(tim);
+  // BLE status dot right
+  uint16_t dc=!bleConn?DIM1:(!bleSec?0x07FF:ACC[gState]);
+  tft.fillCircle(230,9,6,dc);
+  tft.drawCircle(230,9,6,dimC(dc,2));
+}
+
+// ── Stat row (y=168-192) ─────────────────────────────────────────────────
+static void drawStatRow(){
+  tft.fillRect(0,168,240,25,BG);
+  uint16_t col=ACC[gState];
+
+  // Left third: r/w
+  tft.setTextSize(1);
+  tft.setTextColor(g.running>0?col:DIM2,BG);
+  tft.setCursor(4,172); tft.print("r:");
+  tft.setTextSize(2); tft.setCursor(16,169);
+  char rv[4]; snprintf(rv,4,"%u",g.running); tft.print(rv);
+  tft.setTextSize(1); tft.setTextColor(DIM2,BG); tft.setCursor(30,172); tft.print(" w:");
+  tft.setTextColor(g.waiting>0?0xFDA0:DIM2,BG); tft.setTextSize(2); tft.setCursor(48,169);
+  char wv[4]; snprintf(wv,4,"%u",g.waiting); tft.print(wv);
+
+  // Vertical dividers
+  tft.drawFastVLine(80,168,25,DIM1);
+  tft.drawFastVLine(160,168,25,DIM1);
+
+  // Center: token count
+  char tok[10]; fmtTok(tok,10,g.tokToday);
+  int tw=strlen(tok)*12; tft.setTextSize(2); tft.setTextColor(col,BG);
+  tft.setCursor(80+(80-tw)/2,169); tft.print(tok);
+  tft.setTextSize(1); tft.setTextColor(ACC2[gState],BG);
+  tft.setCursor(80+(80-18)/2,185); tft.print("tok");
+
+  // Right: state badge
+  tft.setTextSize(1); tft.setTextColor(col,BG);
+  int bw=strlen(S_LBL[gState])*6;
+  tft.setCursor(160+(80-bw)/2,172); tft.print(S_LBL[gState]);
+  // Small pulsing dot
+  uint16_t dotcol=(frame&1)?col:dimC(col,3);
+  tft.fillCircle(200,187,3,dotcol);
+}
+
+// ── Activity feed (y=194-258) ─────────────────────────────────────────────
+static void drawFeed(){
+  tft.fillRect(0,194,240,65,BG);
+  static const uint16_t bc[]={WHITE,DIM3,DIM2,DIM1,BG};
+  tft.setTextSize(1);
+  for(int i=0;i<5;i++){
+    if(i>=(int)g.nEntries){ break; }
+    tft.setTextColor(bc[i],BG);
+    tft.setCursor(4,196+i*13);
+    tft.print("\x10 ");  // arrow char (ASCII 0x10 = DLE, renders as ► in font)
+    char e[36]; strncpy(e,g.entries[i],35); e[35]=0;
+    tft.print(e);
+  }
+  if(!g.nEntries){
+    tft.setTextColor(DIM1,BG); tft.setCursor(4,220); tft.print("no activity yet");
+  }
+  // Msg line below feed if present
+  if(g.msg[0]){
+    tft.setTextColor(ACC2[gState],BG); tft.setCursor(4,250);
+    char tmp[36]; strncpy(tmp,g.msg,35); tmp[35]=0; tft.print(tmp);
+  }
+}
+
+// ── Secondary stats (y=260-290) ───────────────────────────────────────────
+static void drawSecondary(){
+  tft.fillRect(0,260,240,31,BG);
+  uint16_t col=ACC[gState];
+  tft.setTextSize(1);
+
+  // Left: beat indicator
+  uint32_t ba=g.lastBeat>0?(millis()-g.lastBeat)/1000:999;
+  uint16_t bc2=ba>8?0xE000:(ba>4?0xFDA0:col);
+  tft.fillCircle(8,275,4,(frame&1)?bc2:dimC(bc2,3));
+  char bts[14]; snprintf(bts,14,"%lus ago",ba);
+  tft.setTextColor(bc2,BG); tft.setCursor(16,271); tft.print(bts);
+
+  // Uptime
+  uint32_t us=millis()/1000;
+  char up[16]; snprintf(up,16,"%02lu:%02lu:%02lu",us/3600,(us%3600)/60,us%60);
+  tft.setTextColor(DIM2,BG); tft.setCursor(16,283); tft.print(up);
+
+  // Right: approval rate bar
+  uint32_t tot=g.approvals+g.denials;
+  uint8_t rate=tot?(uint8_t)((uint32_t)g.approvals*100/tot):0;
+  char rs[8]; snprintf(rs,8,"%u%%",rate);
+  tft.setTextColor(DIM3,BG); tft.setCursor(130,262); tft.print("approval");
+  // Thin progress bar
+  int bw=96, bx=130, by=272;
+  tft.drawRect(bx,by,bw,8,DIM1);
+  if(rate>0){ int fw=bw*rate/100; tft.fillRect(bx+1,by+1,fw-1,6,col); }
+  tft.setTextColor(col,BG);
+  int rw=strlen(rs)*6; tft.setCursor(bx+(bw-rw)/2,283); tft.print(rs);
+}
+
+// ── Tab bar (y=292-319) ───────────────────────────────────────────────────
+static void drawTabBar(){
+  tft.fillRect(0,292,240,28,BG);
+  static const char* lbl[3]={"BUDDY","STATS","LOG"};
+  uint16_t col=ACC[gState];
+  for(int i=0;i<3;i++){
+    int x=i*80;
+    bool active=(curTab==(Tab)i);
+    uint16_t fg=active?col:DIM2;
+    tft.setTextSize(1); tft.setTextColor(fg,BG);
+    int tw=strlen(lbl[i])*6;
+    tft.setCursor(x+(80-tw)/2,306); tft.print(lbl[i]);
+    if(active){
+      // Underline in accent color
+      tft.drawFastHLine(x+4,316,72,col);
+      tft.drawFastHLine(x+4,317,72,dimC(col,3));
+    }
+  }
+  tft.drawFastVLine(80,294,24,DIM1);
+  tft.drawFastVLine(160,294,24,DIM1);
+}
+
+// ── Clock-only partial update ─────────────────────────────────────────────
+static void updateTopBarClock(){
+  char tim[6]; getTime(tim);
+  int tw=strlen(tim)*6;
+  tft.setTextSize(1); tft.setTextColor(DIM3,BG2);
+  tft.setCursor((240-tw)/2,5); tft.print(tim);
+}
+
+// ── Targeted text update for BUDDY tab (no full redraw) ───────────────────
+static void updateBuddyText(){
+  drawStatRow();
+  drawFeed();
+  drawSecondary();
+  // Redraw state portion of top bar (device name color may change)
+  tft.setTextSize(1); tft.setTextColor(ACC[gState],BG2);
+  // Overwrite old device name with blank, then reprint in new color
+  tft.fillRect(4,2,strlen(devName)*6,14,BG2);
+  tft.setCursor(4,5); tft.print(devName);
+}
+
+// ── Full BUDDY tab draw ───────────────────────────────────────────────────
+static void drawBuddy(){
+  tft.fillScreen(BG);
+  drawTopBar();
+  glowLine(18,ACC[gState]);
+  // Hero BG (sprite will overwrite)
+  tft.fillRect(SPR_X,SPR_Y,SPR_W,SPR_H,BG);
+  pushCatSprite();
+  glowLine(167,ACC[gState]);
+  drawStatRow();
+  glowLine(193,ACC[gState]);
+  drawFeed();
+  glowLine(259,ACC[gState]);
+  drawSecondary();
+  glowLine(291,ACC[gState]);
+  drawTabBar();
+}
+
+// ── STATS tab ─────────────────────────────────────────────────────────────
+static void drawStats(){
+  tft.fillScreen(BG);
+  uint16_t col=ACC[gState];
+  drawTopBar();
+  glowLine(18,col);
+
+  int y=24, cx=8;
+  auto section=[&](const char* title){ // heading with mini corner brackets
+    tft.setTextSize(1); tft.setTextColor(col,BG);
+    tft.setCursor(cx,y); tft.print(title);
+    tft.drawFastHLine(cx+strlen(title)*6+4,y+3,232-cx-strlen(title)*6-4,dimC(col,4));
+    y+=14;
+  };
+
+  // Sessions
+  section("SESSIONS");
+  uint16_t rbg=g.running>0?0x0220:DIM1; uint16_t rfg=g.running>0?col:DIM2;
+  tft.fillRect(cx,y,110,28,rbg); cornerBrkt(cx,y,110,28,6,rfg);
+  tft.setTextSize(1); tft.setTextColor(rfg,rbg); tft.setCursor(cx+4,y+4); tft.print("RUNNING");
+  char rn[4]; snprintf(rn,4,"%u",g.running);
+  tft.setTextSize(2); tft.setTextColor(g.running>0?col:DIM2,rbg);
+  tft.setCursor(cx+100-strlen(rn)*12,y+7); tft.print(rn);
+  uint16_t wbg=g.waiting>0?0x1800:DIM1; uint16_t wfg=g.waiting>0?0xFDA0:DIM2;
+  tft.fillRect(124,y,108,28,wbg); cornerBrkt(124,y,108,28,6,wfg);
+  tft.setTextSize(1); tft.setTextColor(wfg,wbg); tft.setCursor(128,y+4); tft.print("WAITING");
+  char wn[4]; snprintf(wn,4,"%u",g.waiting);
+  tft.setTextSize(2); tft.setTextColor(g.waiting>0?0xFDA0:DIM2,wbg);
+  tft.setCursor(220-strlen(wn)*12,y+7); tft.print(wn);
+  y+=36;
+
+  glowLine(y,col); y+=6;
+
+  // Tokens
+  section("TOKENS TODAY");
+  char tokbuf[12]; fmtTok(tokbuf,12,g.tokToday);
+  tft.setTextSize(3); tft.setTextColor(col,BG);
+  int tw2=strlen(tokbuf)*18; tft.setCursor((240-tw2)/2,y); tft.print(tokbuf);
+  y+=30;
+  uint32_t mx=1000; while(mx<g.tokToday&&mx<1000000)mx*=10;
+  uint32_t bfill=mx>0?(uint32_t)((uint64_t)g.tokToday*224/mx):0;
+  if(bfill>224)bfill=224;
+  tft.fillRect(8,y,224,10,BG3); tft.drawRect(8,y,224,10,DIM1);
+  if(bfill>0){ uint16_t bc=bfill<75?0x07E0:(bfill<150?0xFFE0:0xE000); tft.fillRect(9,y+1,bfill,8,bc); }
+  y+=14;
+  char mxs[10]; fmtTok(mxs,10,mx);
+  tft.setTextSize(1); tft.setTextColor(DIM2,BG); tft.setCursor(8,y); tft.print("0");
+  tft.setCursor(234-strlen(mxs)*6,y); tft.print(mxs);
+  char lt[20]; char lb[10]; fmtTok(lb,10,g.tokTotal);
+  snprintf(lt,20,"Lifetime: %s",lb);
+  tft.setTextColor(DIM2,BG); tft.setCursor(8,y+10); tft.print(lt);
+  y+=24;
+
+  glowLine(y,col); y+=6;
+
+  // Decisions
+  section("DECISIONS");
+  uint32_t tot=g.approvals+g.denials;
+  auto dbar=[&](const char* lbl,uint32_t v,uint16_t fc,int dy){
+    tft.setTextColor(fc,BG); tft.setCursor(cx,y+dy); tft.print(lbl);
+    uint32_t bw=tot>0?(uint32_t)((uint64_t)v*156/tot):0;
+    tft.fillRect(50,y+dy-2,156,12,BG3); tft.drawRect(50,y+dy-2,156,12,DIM1);
+    if(bw>0)tft.fillRect(51,y+dy-1,bw,10,fc);
+    char cv[6]; snprintf(cv,6,"%u",v); tft.setCursor(210,y+dy); tft.print(cv);
+  };
+  dbar("ALLOW",g.approvals,col,0); dbar("DENY ",g.denials,0xE000,14);
+  uint8_t rate=tot?(uint8_t)((uint32_t)g.approvals*100/tot):0;
+  char rs[20]; snprintf(rs,20,"Allow rate  %u%%",rate);
+  tft.setTextColor(DIM3,BG); tft.setCursor(cx,y+30); tft.print(rs);
+  y+=44;
+
+  glowLine(y,col); y+=6;
+
+  // System
+  section("SYSTEM");
+  uint32_t us=millis()/1000;
+  char ups[24]; snprintf(ups,24,"Uptime  %02lu:%02lu:%02lu",us/3600,(us%3600)/60,us%60);
+  tft.setTextColor(DIM3,BG); tft.setCursor(cx,y); tft.print(ups); y+=12;
+  if(g.lastBeat>0){
+    uint32_t ba=(millis()-g.lastBeat)/1000;
+    char bts[20]; snprintf(bts,20,"Beat  %lus ago",ba);
+    tft.setTextColor(ba>8?0xE000:DIM3,BG); tft.setCursor(cx,y); tft.print(bts); y+=12;
+  }
+  const char* bls=bleConn?(bleSec?"BLE  secured":"BLE  pairing"):"BLE  offline";
+  tft.setTextColor(bleConn?(bleSec?col:0x07FF):0xE000,BG); tft.setCursor(cx,y); tft.print(bls);
+
+  glowLine(291,col);
+  drawTabBar();
+}
+
+// ── LOG tab ────────────────────────────────────────────────────────────────
+static void drawLog(){
+  tft.fillScreen(BG3);
+  drawTopBar();
+  glowLine(18,0x07E0);
+  // Green-on-black terminal
+  tft.fillRect(0,19,240,272,0x0000);
+  tft.setTextSize(1);
+  for(int i=0;i<LOG_VISIBLE;i++){
+    int idx=(logI+logScroll+i)%LOG_N;
+    if(!log_buf[idx][0])continue;
+    tft.setTextColor(i%2==0?0x07E0:0x03A0,0x0000);
+    tft.setCursor(4,21+i*8); tft.print(log_buf[idx]);
+  }
+  // Cursor blink
+  if(frame&1){ int cy=21+LOG_VISIBLE*8; if(cy<286)tft.fillRect(4,cy,8,7,0x07E0); }
+  // Scroll bar
+  int barH=max(8,264*LOG_VISIBLE/LOG_N);
+  int barY=19+(264-barH)*logScroll/max(1,LOG_N-LOG_VISIBLE);
+  tft.fillRect(236,19,4,264,DIM1); tft.fillRect(236,barY,4,barH,DIM2);
+  glowLine(291,0x07E0);
+  drawTabBar();
+}
+
+// ── ATTENTION overlay ──────────────────────────────────────────────────────
+static void drawAttention(){
+  // Full screen alert — state is S_ATTN so accent is 0xFDA0
+  tft.fillScreen(BG);
+  uint16_t col=0xFDA0;
+
+  // Pulsing header strip
+  uint16_t hbg=(frame&1)?0x2000:0x1800;
+  tft.fillRect(0,0,240,36,hbg);
+  cornerBrkt(0,0,240,36,10,col);
+  tft.setTextSize(2); tft.setTextColor(col,hbg);
+  int htw=strlen("! APPROVE !")*12; tft.setCursor((240-htw)/2,10); tft.print("! APPROVE !");
+
+  // Glow line
+  glowLine(37,col);
+
+  // Tool display
+  tft.setTextSize(1); tft.setTextColor(DIM3,BG); tft.setCursor(8,46); tft.print("TOOL:");
+  tft.setTextSize(3); tft.setTextColor(col,BG);
+  int tw=strlen(g.pTool)*18; tft.setCursor((240-tw)/2,54); tft.print(g.pTool);
+
+  // Command box (dark, monospace-feel, with corner brackets)
+  tft.fillRect(8,84,224,34,BG3);
+  cornerBrkt(8,84,224,34,8,dimC(col,3));
+  tft.setTextSize(1); tft.setTextColor(0x07E0,BG3);
+  tft.setCursor(14,92); tft.print("$ "); tft.print(g.pHint);
+  tft.setTextColor(DIM1,BG3); tft.setCursor(14,104); tft.print(g.pId);
+
+  glowLine(122,col);
+
+  // Don't Allow zone (left, x=0-117)
+  tft.fillRect(0,124,117,162,0x1800);
+  cornerBrkt(2,126,113,158,12,dimC(0xE000,2));
+  tft.setTextSize(2); tft.setTextColor(0xE000,0x1800);
+  tft.setCursor(10,175); tft.print("Don't");
+  tft.setCursor(10,195); tft.print("Allow");
+  tft.setTextSize(1); tft.setTextColor(DIM2,0x1800);
+  tft.setCursor(10,220); tft.print("tap left");
+  // Pulsing dot
+  tft.fillCircle(58,250,(frame&1)?8:6,dimC(0xE000,2));
+  tft.fillCircle(58,250,(frame&1)?5:4,0xE000);
+
+  // Allow zone (right, x=123-239)
+  tft.fillRect(123,124,117,162,0x0220);
+  cornerBrkt(125,126,113,158,12,dimC(col,2));
+  tft.setTextSize(2); tft.setTextColor(col,0x0220);
+  tft.setCursor(131,185); tft.print("Allow");
+  tft.setCursor(131,205); tft.print("Once");
+  tft.setTextSize(1); tft.setTextColor(DIM2,0x0220);
+  tft.setCursor(131,220); tft.print("tap right");
+  // Pulsing dot
+  tft.fillCircle(181,250,(frame&1)?8:6,dimC(col,2));
+  tft.fillCircle(181,250,(frame&1)?5:4,col);
+
+  glowLine(291,col);
+  drawTabBar();
+}
+
+// ── Advertising screen ────────────────────────────────────────────────────
+static void drawAdvertising(){
+  tft.fillScreen(BG);
+  uint16_t col=0x07FF; // cyan while offline
+  glowLine(18,col);
+  tft.fillRect(0,19,240,274,BG);
+
+  // Pulsing device name
+  uint16_t nc=(frame&1)?col:dimC(col,3);
+  int nw=strlen(devName)*12; tft.setTextSize(2); tft.setTextColor(nc,BG);
+  tft.setCursor((240-nw)/2,60); tft.print(devName);
+  cornerBrkt((240-nw)/2-8,56,nw+16,24,8,dimC(col,3));
+
+  tft.setTextSize(1); tft.setTextColor(DIM3,BG);
+  tft.setCursor(20,100); tft.print("Searching for Claude Desktop...");
+
+  const char* steps[]={"1. Claude Desktop","2. Help > Troubleshooting",
+                        "3. Enable Developer Mode","4. Developer > Hardware Buddy"};
+  for(int i=0;i<4;i++){
+    tft.setTextColor(i==0?DIM3:DIM2,BG);
+    tft.setCursor(20,120+i*20); tft.print(steps[i]);
+  }
+  // Animated dots
+  for(int i=0;i<5;i++){
+    uint16_t dc=(i==(int)(frame%5))?col:DIM1;
+    tft.fillCircle(80+i*20,230,5,dc);
+  }
+  glowLine(291,col); drawTabBar();
+  // Top bar minimal
+  tft.fillRect(0,0,240,18,BG2);
+  int tw=strlen(devName)*6; tft.setTextSize(1); tft.setTextColor(col,BG2);
+  tft.setCursor((240-tw)/2,5); tft.print(devName);
+  tft.fillCircle(230,9,6,DIM1); tft.drawCircle(230,9,6,DIM2);
+}
+
+static void drawPasskey(){
+  tft.fillScreen(BG);
+  uint16_t col=0xFDA0;
+  tft.fillRect(0,0,240,18,BG2); tft.setTextSize(1); tft.setTextColor(col,BG2);
+  tft.setCursor(4,5); tft.print("BLE Pairing");
+  glowLine(18,col);
+  tft.setTextSize(1); tft.setTextColor(DIM3,BG); tft.setCursor(20,80); tft.print("Enter this code in Claude Desktop:");
+  char pk[8]; snprintf(pk,sizeof(pk),"%06lu",bleKey);
+  tft.setTextSize(4); tft.setTextColor(col,BG);
+  int pw=strlen(pk)*24; tft.setCursor((240-pw)/2,110); tft.print(pk);
+  cornerBrkt((240-pw)/2-10,105,pw+20,44,10,dimC(col,3));
+  tft.setTextSize(1); tft.setTextColor(DIM2,BG); tft.setCursor(20,180); tft.print("Waiting for confirmation...");
+  glowLine(291,col); drawTabBar();
+}
+
+static void drawConnecting(){
+  tft.fillScreen(BG);
+  uint16_t col=0x07FF;
+  glowLine(18,col);
+  tft.setTextSize(2); tft.setTextColor(col,BG); tft.setCursor(20,150); tft.print("Pairing...");
+  tft.setTextSize(1); tft.setTextColor(DIM2,BG); tft.setCursor(20,180); tft.print("Establishing secure BLE connection");
+  glowLine(291,col); drawTabBar();
+}
+
+// ── Protocol ───────────────────────────────────────────────────────────────
+static void sendPerm(const char* id,const char* dec){
+  char b[128]; snprintf(b,128,"{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"%s\"}",id,dec);
+  bleTx(b);
+}
+
+static void parseLine(const char* line){
+  logLine(line);
+  JsonDocument doc;
+  if(deserializeJson(doc,line)!=DeserializationError::Ok)return;
+  g.conn=true; g.lastBeat=millis();
+
+  JsonArray ta=doc["time"].as<JsonArray>();
+  if(!ta.isNull()&&ta.size()>=2){g.epoch=ta[0].as<uint32_t>();g.epochAt=millis();g.tzOff=ta[1].as<int32_t>();}
+
+  const char* evt=doc["evt"];
+  if(evt&&strcmp(evt,"turn")==0){
+    const char* role=doc["role"];
+    if(role&&strcmp(role,"user")==0){strncpy(g.msg,"thinking...",63);turnEnd=millis()+30000;g.running=1;}
+    else if(role&&strcmp(role,"assistant")==0){strncpy(g.msg,"done",63);turnEnd=0;g.running=0;}
+    BS prev=gState; recompute();
+    if(gState!=prev)dirty=true; else textDirty=true;
+    return;
+  }
+
+  if(!doc["running"].isNull())      g.running =doc["running"].as<uint8_t>();
+  if(!doc["waiting"].isNull())      g.waiting =doc["waiting"].as<uint8_t>();
+  if(!doc["tokens_today"].isNull()) g.tokToday=doc["tokens_today"].as<uint32_t>();
+  if(!doc["tokens"].isNull())       g.tokTotal=doc["tokens"].as<uint32_t>();
+  const char* m=doc["msg"]; if(m){strncpy(g.msg,m,63);g.msg[63]=0;}
+
+  JsonArray ea=doc["entries"].as<JsonArray>();
+  if(!ea.isNull()){g.nEntries=0;for(JsonVariant v:ea){if(g.nEntries>=5)break;strncpy(g.entries[g.nEntries],v.as<const char*>(),51);g.entries[g.nEntries++][51]=0;}}
+
+  JsonObject p=doc["prompt"].as<JsonObject>();
+  if(!p.isNull()){strncpy(g.pId,p["id"]|"",39);strncpy(g.pTool,p["tool"]|"",19);strncpy(g.pHint,p["hint"]|"",43);g.waiting=1;}
+  else if(!doc["waiting"].isNull()&&doc["waiting"].as<uint8_t>()==0){g.pId[0]=g.pTool[0]=g.pHint[0]=0;}
+
+  const char* cmd=doc["cmd"];
+  if(cmd){
+    if     (!strcmp(cmd,"status")){char r[128];snprintf(r,128,"{\"ack\":\"status\",\"ok\":true,\"data\":{\"name\":\"%s\",\"sec\":%s}}",devName,bleSec?"true":"false");bleTx(r);}
+    else if(!strcmp(cmd,"name"))  bleTx("{\"ack\":\"name\",\"ok\":true}");
+    else if(!strcmp(cmd,"owner")) bleTx("{\"ack\":\"owner\",\"ok\":true}");
+    else if(!strcmp(cmd,"unpair"))bleTx("{\"ack\":\"unpair\",\"ok\":true}");
+  }
+  BS prev=gState; recompute();
+  if(gState!=prev||!bleConn)dirty=true; else textDirty=true;
+}
+
+// ── BLE init ───────────────────────────────────────────────────────────────
+static void initBLE(){
+  BLEDevice::init(devName);
+  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
+  BLEDevice::setSecurityCallbacks(new SecCB());
+  BLESecurity* pSec=new BLESecurity();
+  pSec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+  pSec->setCapability(ESP_IO_CAP_OUT);
+  pSec->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK|ESP_BLE_ID_KEY_MASK);
+  pSec->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK|ESP_BLE_ID_KEY_MASK);
+  pSec->setKeySize(16);
+  BLEServer* srv=BLEDevice::createServer(); srv->setCallbacks(new SrvCB());
+  BLEService* svc=srv->createService(BLEUUID(NUS_SVC));
+  pTx=svc->createCharacteristic(BLEUUID(NUS_TX),BLECharacteristic::PROPERTY_READ|BLECharacteristic::PROPERTY_NOTIFY);
+  pTx->addDescriptor(new BLE2902());
+  BLECharacteristic* rx=svc->createCharacteristic(BLEUUID(NUS_RX),BLECharacteristic::PROPERTY_WRITE|BLECharacteristic::PROPERTY_WRITE_NR);
+  rx->setCallbacks(new RxCB());
+  svc->start();
+  BLEAdvertising* adv=BLEDevice::getAdvertising();
+  adv->addServiceUUID(BLEUUID(NUS_SVC)); adv->setScanResponse(true);
+  adv->setMinPreferred(0x06); adv->setMaxPreferred(0x12);
+  BLEDevice::startAdvertising();
+}
+
+// ── Arduino ────────────────────────────────────────────────────────────────
+void setup(){
+  pinMode(LED_RED,OUTPUT);   digitalWrite(LED_RED,HIGH);
+  pinMode(LED_GREEN,OUTPUT); digitalWrite(LED_GREEN,HIGH);
+  pinMode(LED_BLUE,OUTPUT);  digitalWrite(LED_BLUE,HIGH);
+  pinMode(BL_PIN,OUTPUT);    digitalWrite(BL_PIN,HIGH);
+
+  tft.init(); tft.setRotation(0); tft.initDMA(true); tft.fillScreen(BG);
+  tft.setTextSize(1); tft.setTextColor(0x07FF,BG);
+  tft.setCursor(60,155); tft.print("Claude Buddy");
+  tft.setTextColor(DIM2,BG); tft.setCursor(72,170); tft.print("starting...");
+
+  catSpr.createSprite(SPR_W,SPR_H);
+  catSpr.setTextWrap(false);
+
+  tspi.begin(TOUCH_CLK,TOUCH_MISO,TOUCH_MOSI,TOUCH_CS);
+  ts.begin(tspi); ts.setRotation(0);
+
+  uint8_t mac[6]; esp_read_mac(mac,ESP_MAC_BT);
+  snprintf(devName,sizeof(devName),"Claude-%02X%02X",mac[4],mac[5]);
+
+  initBLE();
+  delay(600);
+  tft.startWrite(); drawAdvertising(); tft.endWrite();
+}
+
+void loop(){
+  uint32_t now=millis();
+
+  while(rAvail()>0){
+    char c=rRead();
+    if(c=='\n'||c=='\r'){if(llen>0){lbuf[llen]=0;parseLine(lbuf);llen=0;}}
+    else if(llen<(int)sizeof(lbuf)-1){lbuf[llen++]=c;}
+  }
+
+  if(bleConn&&!bleSec&&!showKey&&(now-connAt)>3000){bleSec=true;dirty=true;}
+  if(turnEnd>0&&now>turnEnd){turnEnd=0;g.running=0;strncpy(g.msg,"idle",63);recompute();dirty=true;}
+  if(g.conn&&(now-g.lastBeat)>15000){g.conn=false;recompute();dirty=true;}
+
+  // LEDs
+  if(gState==S_ATTN){
+    if(now-lastLed>400){lastLed=now;ledOn=!ledOn;digitalWrite(LED_RED,ledOn?LOW:HIGH);digitalWrite(LED_GREEN,HIGH);}
+  }else if(bleConn&&bleSec){
+    if(now-lastLed>2000){lastLed=now;ledOn=!ledOn;digitalWrite(LED_RED,HIGH);digitalWrite(LED_GREEN,ledOn?LOW:HIGH);}
+  }else{digitalWrite(LED_RED,HIGH);digitalWrite(LED_GREEN,HIGH);}
+
+  // Touch
+  if(ts.tirqTouched()&&ts.touched()){
+    TS_Point p=ts.getPoint();
+    if(!swk.active){swk.sx=p.x;swk.sy=p.y;swk.st=millis();swk.active=true;swk.drag=false;swk.startState=gState;}
+    swk.ex=p.x;swk.ey=p.y;
+    if(!swk.drag&&(abs(swk.ex-swk.sx)>500||abs(swk.ey-swk.sy)>500))swk.drag=true;
+  }else if(swk.active){
+    int dx=swk.ex-swk.sx,dy=swk.ey-swk.sy;
+    uint32_t dt=millis()-swk.st;
+    if(swk.drag&&abs(dx)>800&&abs(dx)>abs(dy)*2&&dt<600){
+      curTab=(Tab)((curTab+(dx<0?1:2))%3);logScroll=0;dirty=true;
+    }else if(swk.drag&&curTab==TAB_LOG&&abs(dy)>300){
+      logScroll=constrain(logScroll+(-dy/120),0,max(0,LOG_N-LOG_VISIBLE));dirty=true;
+    }else if(!swk.drag&&dt<400){
+      int sx,sy; mapTouch(swk.ex,swk.ey,&sx,&sy);
+      if(swk.startState==S_ATTN&&g.pId[0]&&sy<292){
+        bool ok=(sx>=120);
+        char pl[48]; snprintf(pl,48,"PERM %s: %s",g.pTool,ok?"allow":"deny"); logLine(pl);
+        sendPerm(g.pId,ok?"once":"deny");
+        if(ok)g.approvals++;else g.denials++;
+        g.waiting=0;g.pId[0]=0;recompute();dirty=true;
+      }else if(sy>=292){
+        Tab t=(sx<80)?TAB_BUDDY:(sx<160)?TAB_STATS:TAB_LOG;
+        if(t!=curTab){curTab=t;logScroll=0;dirty=true;}
+      }
+    }
+    swk.active=false;
+  }
+
+  // Render — every path wrapped in startWrite/endWrite (single SPI transaction)
+  static uint32_t lastAnim=0;
+  if(dirty){
+    tft.startWrite();
+    if(!bleConn)            drawAdvertising();
+    else if(showKey)        drawPasskey();
+    else if(!bleSec)        drawConnecting();
+    else if(gState==S_ATTN) drawAttention();
+    else if(curTab==TAB_BUDDY) drawBuddy();
+    else if(curTab==TAB_STATS) drawStats();
+    else                       drawLog();
+    tft.endWrite();
+    dirty=false;textDirty=false;
+  }else if(textDirty){
+    tft.startWrite();
+    if(bleConn&&bleSec&&curTab==TAB_BUDDY&&gState!=S_ATTN){
+      updateBuddyText();
+      pushCatSprite();  // also refresh sprite (state label may have changed)
+    }
+    tft.endWrite();
+    textDirty=false;
+  }else if(now-lastAnim>700){
+    frame++;
+    tft.startWrite();
+    if(bleConn&&bleSec&&gState!=S_ATTN&&curTab==TAB_BUDDY) pushCatSprite();
+    updateTopBarClock();
+    if(curTab==TAB_LOG&&bleConn&&bleSec&&gState!=S_ATTN){
+      int cy=21+LOG_VISIBLE*8;
+      if(cy<286){tft.fillRect(4,cy,8,7,(frame&1)?0x07E0:0x0000);}
+    }
+    tft.endWrite();
+    lastAnim=now;
+  }
+}
