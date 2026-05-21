@@ -8,10 +8,13 @@ Based on the [claude-desktop-buddy](https://github.com/anthropics/claude-desktop
 
 ## Hardware
 
-| Board | Display | Status |
-|-------|---------|--------|
-| **Cheap Yellow Display (CYD / ESP32-2432S028)** | 2.8" ILI9341 240×320 + XPT2046 touch | **Primary — flashed and working** |
-| M5StickC (original) | 80×160 LCD | Secondary — BLE firmware in `firmware/` |
+| Board | Display | Driver | PlatformIO env | Status |
+|-------|---------|--------|----------------|--------|
+| **CYD (ESP32-2432S028)** | 2.8" 240×320 + XPT2046 | ILI9341 | `cyd` | Primary — working |
+| **TPM408-2.8** (Amazon A2150 / X004QKM5EP) | 2.8" 240×320 + XPT2046 | **ILI9342** | `cyd_new` | Working — requires different driver |
+| M5StickC (original) | 80×160 LCD | — | — | Secondary — BLE firmware in `firmware/` |
+
+> **Board identification:** The TPM408-2.8 has "TPM408-2.8" printed on the PCB near the USB port. It looks identical to the original CYD but requires the ILI9342 driver — using ILI9341 only addresses 75% of the panel.
 
 ---
 
@@ -91,13 +94,23 @@ sudo chmod 666 /dev/ttyUSB0      # one-shot for the current session
 
 ## CYD — Flash
 
-```bash
-export PATH="$HOME/.platformio/penv/bin:$PATH"
-sudo chmod 666 /dev/ttyUSB0
+Two boards share the same source. Use the correct environment for your board.
 
+**Board A — Original CYD (ESP32-2432S028, ILI9341)**
+```bash
+sudo chmod 666 /dev/ttyUSB0
 cd firmware-cyd
-pio run --target upload --upload-port /dev/ttyUSB0
+pio run -e cyd --target upload --upload-port /dev/ttyUSB0
 ```
+
+**Board B — TPM408-2.8 / A2150 (ILI9342)**
+```bash
+sudo chmod 666 /dev/ttyUSB0
+cd firmware-cyd
+pio run -e cyd_new --target upload --upload-port /dev/ttyUSB0
+```
+
+The `cyd_new` environment injects `-DNEW_BOARD`, switches to `ILI9342_DRIVER`, and sets `TFT_WIDTH=320, TFT_HEIGHT=240` (landscape-native dimensions for the ILI9342). Rotation 3 then produces the correct portrait right-side-up orientation with full 240×320 coverage.
 
 ### CYD pinout
 
@@ -237,9 +250,9 @@ claude-buddy/
 ├── README.md
 ├── HANDOFF.md
 │
-├── firmware-cyd/              ← CYD (primary, currently flashed)
-│   ├── platformio.ini         ← esp32dev, TFT_eSPI@40MHz+DMA, XPT2046
-│   └── src/main.cpp           ← sci-fi HUD UI, BLE protocol, sprite animation
+├── firmware-cyd/              ← CYD boards (primary)
+│   ├── platformio.ini         ← [env:cyd] ILI9341 + [env:cyd_new] ILI9342
+│   └── src/main.cpp           ← sci-fi HUD UI, BLE, sprite animation (#ifdef NEW_BOARD for TPM408)
 │
 ├── firmware/                  ← M5StickC original (BLE)
 │   ├── platformio.ini

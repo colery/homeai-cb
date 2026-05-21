@@ -8,9 +8,9 @@ Based on: https://github.com/anthropics/claude-desktop-buddy
 ---
 
 ## Hardware currently in use
-- **Primary: CYD** (Cheap Yellow Display / ESP32-2432S028) — 2.8" ILI9341 240×320 + XPT2046 resistive touch, RGB LEDs
-- **Secondary: M5StickC original** — 80×160 LCD, BLE, two physical buttons
-- **New board (unresolved):** A second CYD/BYD variant, also labelled 240×320, 2.8". Physically different panel mounting — needs different rotation + layout redesign. See "New Board Issue" below.
+- **Board A — Original CYD** (ESP32-2432S028): 2.8" **ILI9341** 240×320 + XPT2046 resistive touch, RGB LEDs. Flash with `[env:cyd]`.
+- **Board B — New variant** (TPM408-2.8 / Amazon A2150 / X004QKM5EP): 2.8" **ILI9342** panel mounted 90° off. Uses `[env:cyd_new]`. Requires `ILI9342_DRIVER` + `TFT_WIDTH=320,TFT_HEIGHT=240` to address the full panel.
+- **Secondary: M5StickC original** — 80×160 LCD, BLE, two physical buttons (Linux/Claude Code mode only).
 
 ---
 
@@ -38,37 +38,32 @@ Claude Desktop only sets `running > 0` for tool-assisted sessions, not plain cha
 
 ---
 
-## New Board Issue (unresolved)
+## New Board — Resolved
 
-A second CYD/BYD variant (also 2.8", also labelled 240×320) has its display panel physically mounted at 90° relative to the original CYD. The current firmware (`setRotation(0)`) shows portrait correctly on the original board but landscape on the new board.
+**Board B** (TPM408-2.8 / Amazon A2150) uses an **ILI9342** controller (not ILI9341). The ILI9341 driver only addressed 75% of the panel; switching to ILI9342 with `TFT_WIDTH=320, TFT_HEIGHT=240` gives correct full-panel access. With those dimensions, `setRotation(3)` produces the correct portrait right-side-up orientation and full 240×320 layout.
 
-**Rotation test results on new board:**
-| setRotation | Visual result |
-|-------------|--------------|
-| 0 | Landscape (sideways) |
-| 1 | Portrait upside-down, bottom 25% of screen unused |
-| 2 | Landscape (other direction) |
-| 3 | Portrait right-side-up orientation, but bottom ~25% of UI content clipped |
-
-**Root cause:** Rotations 1 and 3 swap the logical coordinate space to 320w×240h (landscape logical). The layout is hardcoded for 240w×320h (portrait logical). Content drawn at y > 239 is clipped, and x > 239 leaves 80px unused. So neither rotation 1 nor 3 fills the screen correctly with the current layout.
-
-**Fix needed:** For the new board, use `setRotation(3)` + redesign the entire layout using 320 logical width × 240 logical height. Every hardcoded pixel coordinate in `drawBuddy()`, `drawStats()`, `drawLog()`, `drawAttn()`, `updateBuddyText()`, `pushCatSprite()`, sprite dimensions, etc. must be updated. Consider a compile-time `#define NEW_BOARD` flag to keep both layouts.
-
-**Current firmware state:** `setRotation(0)` — correct for original CYD, wrong for new board.
+The `#define NEW_BOARD` flag is injected at build time — no source file edits needed to switch boards.
 
 ---
 
-## To flash original CYD board
-Firmware is already set to `setRotation(0)` — just flash:
+## Flashing — Board A (Original CYD / ESP32-2432S028 / ILI9341)
 ```bash
-export PATH="$HOME/.platformio/penv/bin:$PATH"
 sudo chmod 666 /dev/ttyUSB0
 cd firmware-cyd
-pio run --target upload --upload-port /dev/ttyUSB0
+pio run -e cyd --target upload --upload-port /dev/ttyUSB0
 ```
+- Driver: `ILI9341_DRIVER`, `TFT_WIDTH=240`, `TFT_HEIGHT=320`
+- Rotation: `setRotation(0)` — portrait, full 240×320
 
-## To flash new board variant (once layout redesign is done)
-Change both `setRotation(0)` → `setRotation(3)` calls in `setup()` (tft and ts), then redesign layout for 320w×240h before flashing. Not yet implemented.
+## Flashing — Board B (TPM408-2.8 / A2150 / ILI9342)
+```bash
+sudo chmod 666 /dev/ttyUSB0
+cd firmware-cyd
+pio run -e cyd_new --target upload --upload-port /dev/ttyUSB0
+```
+- Driver: `ILI9342_DRIVER`, `TFT_WIDTH=320`, `TFT_HEIGHT=240`
+- Rotation: `setRotation(3)` — portrait right-side-up, full 240×320
+- Both environments share the same `firmware-cyd/src/main.cpp`. The `cyd_new` environment injects `-DNEW_BOARD` which activates the rotation-3 + ILI9342 path.
 
 ---
 
