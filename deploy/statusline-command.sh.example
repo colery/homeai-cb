@@ -1,0 +1,46 @@
+#!/bin/sh
+input=$(cat)
+# Claude Buddy: forward plan usage to the hub (background, silent, never blocks the status line)
+printf '%s' "$input" | python3 /home/ryan/github/homeai-cb/hooks/buddy_hook.py >/dev/null 2>&1 &
+user=$(whoami)
+host=$(hostname -s)
+raw_dir=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // empty')
+# Mirror zsh %1~ : last path component, with ~ substitution for $HOME
+if [ "$raw_dir" = "$HOME" ]; then
+  short_dir="~"
+else
+  last=$(basename "$raw_dir")
+  parent=$(dirname "$raw_dir")
+  if [ "$parent" = "$HOME" ]; then
+    short_dir="~/$last"
+  else
+    short_dir="$last"
+  fi
+fi
+model=$(echo "$input" | jq -r '.model.display_name // .model.id // empty')
+used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
+line="${user}@${host} ${short_dir}"
+if [ -n "$model" ]; then
+  line="$line  [${model}]"
+fi
+if [ -n "$used" ]; then
+  used_int=$(printf '%.0f' "$used")
+  # 10-cell progress bar, color-coded: green <70, yellow 70-89, red 90+
+  width=10
+  filled=$(( used_int * width / 100 ))
+  [ "$filled" -gt "$width" ] && filled=$width
+  empty=$(( width - filled ))
+  if [ "$used_int" -ge 90 ]; then
+    color='\033[31m'   # red
+  elif [ "$used_int" -ge 70 ]; then
+    color='\033[33m'   # yellow
+  else
+    color='\033[32m'   # green
+  fi
+  reset='\033[0m'
+  bar=""
+  i=0; while [ "$i" -lt "$filled" ]; do bar="${bar}█"; i=$((i+1)); done
+  i=0; while [ "$i" -lt "$empty" ];  do bar="${bar}░"; i=$((i+1)); done
+  line="$line ${color}${bar}${reset} ${used_int}%"
+fi
+printf '%b' "$line"

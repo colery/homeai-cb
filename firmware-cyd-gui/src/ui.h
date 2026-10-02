@@ -19,9 +19,17 @@ struct UiModel {
   // per source: [0] = USB (Claude Code via the hub), [1] = BLE (Claude Desktop)
   uint8_t  run[2], wait[2];
   uint32_t tok[2], tokLife;
-  char     msg[64];
-  char     entries[UI_ENTRIES][52];
-  uint8_t  nEntries;
+  char     msg[64];                    // most recent status line from either source (hero title)
+  // per source, same indexing as run/wait/tok: [0] = Claude Code (USB), [1] = Claude Desktop (BLE)
+  char     msgS[2][64];
+  char     entriesS[2][UI_ENTRIES][52];
+  uint8_t  nEntriesS[2];
+  uint8_t  pSrc;                       // source of the pending permission prompt
+  // plan usage from Claude Code's status line (via the hub)
+  bool     has5, has7;
+  uint8_t  pct5, pct7;
+  int32_t  rst5, rst7;                 // seconds until the window resets, -1 unknown
+  int8_t   ctx;                        // context window fill %, -1 unknown
   bool     hasPrompt, pInfo;
   char     pTool[20], pHint[44], pId[40];
   uint16_t approvals, denials;

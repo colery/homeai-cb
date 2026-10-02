@@ -90,7 +90,18 @@ def main():
     host = socket.gethostname()
     ev = {'session': f'{host}:{sid[:8]}', 'host': host}
 
-    if name == 'SessionStart':
+    if not name and ('rate_limits' in data or 'context_window' in data):
+        # Claude Code status line input: plan usage windows + context fill
+        rl = data.get('rate_limits') or {}
+
+        def win(k):
+            w = rl.get(k) or {}
+            p = w.get('used_percentage')
+            return None if p is None else {'p': float(p), 'r': int(w.get('resets_at') or 0)}
+
+        ev.update(t='usage', five=win('five_hour'), seven=win('seven_day'),
+                  ctx=(data.get('context_window') or {}).get('used_percentage'))
+    elif name == 'SessionStart':
         ev['t'] = 'start'
         try:   # new session: its transcript starts empty, so count everything in it
             with open(os.path.join(tempfile.gettempdir(), f'claude_buddy_off_{sid[:8]}'), 'w') as f:

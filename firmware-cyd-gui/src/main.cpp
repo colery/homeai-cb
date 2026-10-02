@@ -103,7 +103,9 @@ struct Buddy {
   bool conn = false; uint8_t running = 0, waiting = 0;
   uint32_t tokToday = 0, tokTotal = 0, lastBeat = 0;
   uint8_t runS[2] = {}, waitS[2] = {}; uint32_t tokS[2] = {}; uint8_t pSrc = 0;   // [0]=USB, [1]=BLE
-  char msg[64] = ""; char entries[UI_ENTRIES][52] = {}; uint8_t nEntries = 0;
+  char msg[64] = "";                                    // latest from either source (hero title)
+  char msgS[2][64] = {"", ""}; char entriesS[2][UI_ENTRIES][52] = {}; uint8_t nEntriesS[2] = {0, 0};
+  bool has5 = false, has7 = false; float pct5 = 0, pct7 = 0; int32_t rst5 = -1, rst7 = -1; int ctx = -1; uint32_t limAt = 0;
   char pId[40] = "", pTool[20] = "", pHint[44] = ""; bool pInfo = false;
   uint16_t approvals = 0, denials = 0;
   uint8_t spark[UI_SPARK] = {}; uint8_t nSpark = 0;
@@ -166,8 +168,8 @@ static void parseLine(const char* line, bool usb = false) {
   const char* evt = doc["evt"];
   if (evt && strcmp(evt, "turn") == 0) {
     const char* role = doc["role"];
-    if (role && strcmp(role, "user") == 0) { strncpy(g.msg, "thinking...", 63); turnEnd = millis() + 30000; g.runS[1] = 1; }
-    else if (role && strcmp(role, "assistant") == 0) { strncpy(g.msg, "done", 63); turnEnd = 0; g.runS[1] = 0; }
+    if (role && strcmp(role, "user") == 0) { strncpy(g.msg, "thinking...", 63); strncpy(g.msgS[1], "thinking...", 63); turnEnd = millis() + 30000; g.runS[1] = 1; }
+    else if (role && strcmp(role, "assistant") == 0) { strncpy(g.msg, "done", 63); strncpy(g.msgS[1], "done", 63); turnEnd = 0; g.runS[1] = 0; }
     recompute();
     return;
   }
@@ -177,12 +179,22 @@ static void parseLine(const char* line, bool usb = false) {
   if (!doc["waiting"].isNull())      g.waitS[src] = doc["waiting"].as<uint8_t>();
   if (!doc["tokens_today"].isNull()) g.tokS[src]  = doc["tokens_today"].as<uint32_t>();
   if (!doc["tokens"].isNull())       g.tokTotal   = doc["tokens"].as<uint32_t>();
-  const char* m = doc["msg"]; if (m) { strncpy(g.msg, m, 63); g.msg[63] = 0; }
+  const char* m = doc["msg"]; if (m) { strncpy(g.msg, m, 63); g.msg[63] = 0; strncpy(g.msgS[src], m, 63); g.msgS[src][63] = 0; }
 
   JsonArray ea = doc["entries"].as<JsonArray>();
   if (!ea.isNull()) {
-    g.nEntries = 0;
-    for (JsonVariant v : ea) { if (g.nEntries >= UI_ENTRIES) break; strncpy(g.entries[g.nEntries], v.as<const char*>(), 51); g.entries[g.nEntries++][51] = 0; }
+    g.nEntriesS[src] = 0;
+    for (JsonVariant v : ea) { uint8_t& n = g.nEntriesS[src]; if (n >= UI_ENTRIES) break; strncpy(g.entriesS[src][n], v.as<const char*>(), 51); g.entriesS[src][n++][51] = 0; }
+  }
+
+  if (usb) {
+    JsonObject lm = doc["limits"].as<JsonObject>();
+    if (!lm.isNull()) {
+      g.has5 = !lm["h5"].isNull(); g.pct5 = lm["h5"] | 0.0f; g.rst5 = lm["h5s"] | -1;
+      g.has7 = !lm["d7"].isNull(); g.pct7 = lm["d7"] | 0.0f; g.rst7 = lm["d7s"] | -1;
+      g.ctx = lm["cx"].isNull() ? -1 : (int)(lm["cx"].as<float>() + 0.5f);
+      g.limAt = millis();
+    } else { g.has5 = g.has7 = false; g.ctx = -1; }
   }
 
   JsonArray sp = doc["spark"].as<JsonArray>();
@@ -258,8 +270,18 @@ static void fillModel() {
   for (int i = 0; i < 2; i++) { um.run[i] = g.runS[i]; um.wait[i] = g.waitS[i]; um.tok[i] = g.tokS[i]; }
   um.tokLife = g.tokTotal;
   strlcpy(um.msg, g.msg, sizeof um.msg);
-  um.nEntries = g.nEntries;
-  for (int i = 0; i < g.nEntries && i < UI_ENTRIES; i++) strlcpy(um.entries[i], g.entries[i], sizeof um.entries[i]);
+  for (int s = 0; s < 2; s++) {
+    strlcpy(um.msgS[s], g.msgS[s], sizeof um.msgS[s]);
+    um.nEntriesS[s] = g.nEntriesS[s];
+    for (int i = 0; i < g.nEntriesS[s] && i < UI_ENTRIES; i++) strlcpy(um.entriesS[s][i], g.entriesS[s][i], sizeof um.entriesS[s][i]);
+  }
+  um.pSrc = g.pSrc;
+  um.has5 = g.has5; um.has7 = g.has7;
+  um.pct5 = (uint8_t)(g.pct5 + 0.5f); um.pct7 = (uint8_t)(g.pct7 + 0.5f);
+  uint32_t el = (millis() - g.limAt) / 1000;
+  um.rst5 = g.rst5 >= 0 ? (g.rst5 > (int32_t)el ? g.rst5 - el : 0) : -1;
+  um.rst7 = g.rst7 >= 0 ? (g.rst7 > (int32_t)el ? g.rst7 - el : 0) : -1;
+  um.ctx = g.ctx;
   um.hasPrompt = g.pId[0] != 0; um.pInfo = g.pInfo;
   strlcpy(um.pTool, g.pTool, sizeof um.pTool); strlcpy(um.pHint, g.pHint, sizeof um.pHint); strlcpy(um.pId, g.pId, sizeof um.pId);
   um.approvals = g.approvals; um.denials = g.denials;
@@ -377,7 +399,7 @@ void loop() {
   }
 
   if (bleConn && !bleSec && !showKey && (now - connAt) > 3000) bleSec = true;
-  if (turnEnd > 0 && now > turnEnd) { turnEnd = 0; g.runS[1] = 0; strncpy(g.msg, "idle", 63); }
+  if (turnEnd > 0 && now > turnEnd) { turnEnd = 0; g.runS[1] = 0; strncpy(g.msg, "idle", 63); strncpy(g.msgS[1], "idle", 63); }
   if (g.conn && (int32_t)(now - g.lastBeat) > 15000) g.conn = false;
   recompute();
 

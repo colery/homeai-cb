@@ -52,6 +52,7 @@ class Hub:
         self.day = date.today()
         self.rev = 0                       # bumped on every accepted event
         self.calls = deque(maxlen=6000)    # timestamps of tool calls, for the activity chart
+        self.limits = {}                   # account-wide plan windows from Claude Code's status line
         self.resync = threading.Event()    # device just booted: resend the clock and a heartbeat
         self.device = {'connected': False, 'port': None, 'last_send': 0, 'last_rx': 0}
 
@@ -101,6 +102,14 @@ class Hub:
                     s['turn'] = False
                     s['tools'].clear()
                     s['prompt'] = None
+            elif t == 'usage':
+                for k in ('five', 'seven'):
+                    w = ev.get(k)
+                    if isinstance(w, dict):
+                        self.limits[k] = {'p': float(w.get('p', 0)), 'r': int(w.get('r', 0))}
+                c = ev.get('ctx')
+                if c is not None:
+                    s['ctx'] = float(c)
             elif t == 'stop':
                 s['turn'] = False
                 s['tools'].clear()
@@ -171,6 +180,22 @@ class Hub:
                 if 0 <= age < 1800:
                     spark[29 - int(age // 60)] += 1
             hb['spark'] = [min(v, 99) for v in spark]
+            lim = {}
+            for key, short in (('five', 'h5'), ('seven', 'd7')):
+                w = self.limits.get(key)
+                if not w:
+                    continue
+                left = w['r'] - ts if w['r'] else -1
+                if w['r'] and left <= 0:       # window rolled over; Claude Code drops it too
+                    self.limits.pop(key, None)
+                    continue
+                lim[short] = round(w['p'], 1)
+                lim[short + 's'] = int(left) if left >= 0 else -1
+            ctxs = [s for s in live if 'ctx' in s]
+            if ctxs:
+                lim['cx'] = round(max(ctxs, key=lambda s: s['last'])['ctx'], 1)
+            if lim:
+                hb['limits'] = lim
             return hb
 
     def debug(self):
