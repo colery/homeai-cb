@@ -117,6 +117,9 @@ static lv_obj_t *hero, *hero_dots[3], *hero_title, *ring, *head, *eyeL, *eyeR, *
 static lv_obj_t *whiskers[4], *badge_z, *badge_bang, *chip, *chip_lbl;
 static lv_obj_t *earL, *earR;
 
+// home / plan usage inside the buddy window
+static lv_obj_t *hp_lbl[2], *hp_pct[2], *hp_rst[2], *hp_fill[2], *hero_ctx;
+
 // home / one card per connected Claude instance
 struct Inst { lv_obj_t *dot, *name, *chip, *chip_lbl, *msg, *entry, *tok, *toktxt; };
 static Inst inst[2];
@@ -601,6 +604,8 @@ static void build_statusbar(lv_obj_t* scr) {
   lv_obj_align(sb_ble, LV_ALIGN_RIGHT_MID, -10, 0);
 }
 
+static lv_obj_t* track_bar(lv_obj_t* c, int x, int y, int w, int h, uint32_t col);
+static WBar wb_hp[2];
 static NumAnim n_tok_inst[2];
 
 static void build_inst(lv_obj_t* tab, int i, int y) {
@@ -642,10 +647,12 @@ static void build_home(lv_obj_t* tab) {
   static const uint32_t tl[3] = {0xff5f57, 0xffbd2e, 0x28c840};
   for (int i = 0; i < 3; i++) hero_dots[i] = dot(bar, 10 + i * 14, 7, 8, tl[i]);
   hero_title = label(bar, "starting", F12, COL_TEXT2);
-  lv_obj_set_size(hero_title, 150, 14);
+  lv_obj_set_size(hero_title, 112, 14);
   lv_label_set_long_mode(hero_title, LV_LABEL_LONG_CLIP);
   lv_obj_set_style_text_align(hero_title, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(hero_title, LV_ALIGN_CENTER, 14, 0);
+  lv_obj_align(hero_title, LV_ALIGN_CENTER, -3, 0);
+  hero_ctx = label(bar, "", F12, COL_DIM);
+  lv_obj_align(hero_ctx, LV_ALIGN_RIGHT_MID, -10, 0);
 
   build_mascot(hero, MS_CX, MS_CY);
 
@@ -654,6 +661,20 @@ static void build_home(lv_obj_t* tab) {
   lv_obj_set_style_border_width(chip, 1, 0);
   chip_lbl = label(chip, "IDLE", F12, COL_TEXT);
   lv_obj_center(chip_lbl);
+
+  // plan usage either side of the buddy: 5-hour on the left, 7-day on the right
+  static const char* hn[2] = {"5 HOUR", "7 DAY"};
+  for (int i = 0; i < 2; i++) {
+    int x = i ? 158 : 12;
+    hp_lbl[i] = label(hero, hn[i], F12, COL_TEXT2);
+    lv_obj_set_pos(hp_lbl[i], x, 30);
+    hp_pct[i] = label(hero, "--", F20, COL_DIM);
+    lv_obj_set_pos(hp_pct[i], x, 44);
+    hp_fill[i] = track_bar(hero, x, 72, 52, 6, COL_OK);
+    wb_hp[i] = {hp_fill[i], 0, 0};
+    hp_rst[i] = label(hero, "", F12, COL_DIM);
+    lv_obj_set_pos(hp_rst[i], x, 82);
+  }
 
   build_inst(tab, 0, 134);
   build_inst(tab, 1, 198);
@@ -1040,7 +1061,7 @@ void ui_update(const UiModel& m) {
 
   // hero
   const char* title = m.msg[0] ? m.msg : (st == UI_SLEEP ? "no activity" : "idle");
-  clipText(hero_title, title, 150);
+  clipText(hero_title, title, 112);
 
   // one card per connected Claude instance
   uint32_t tokTotal = m.tok[0] + m.tok[1];
@@ -1091,6 +1112,29 @@ void ui_update(const UiModel& m) {
       }
     }
     if (m.ctx >= 0) { snprintf(t, sizeof t, "context %d%%", m.ctx); setText(pl_ctx, t); } else setText(pl_ctx, "");
+
+    // same numbers inside the buddy window
+    for (int i = 0; i < 2; i++) {
+      if (has[i]) {
+        uint32_t col = pc_[i] >= 90 ? COL_BAD : (pc_[i] >= 70 ? 0xffc83d : COL_OK);
+        snprintf(t, sizeof t, "%u%%", pc_[i]); setText(hp_pct[i], t);
+        lv_obj_set_style_text_color(hp_pct[i], C(col), 0);
+        setWBar(wb_hp[i], pc_[i] * 52 / 100);
+        lv_obj_set_style_bg_color(hp_fill[i], C(col), 0);
+        int32_t d = rs[i];
+        if (d < 0)            t[0] = 0;
+        else if (d >= 86400)  snprintf(t, sizeof t, "%ldd %ldh", (long)(d / 86400), (long)((d % 86400) / 3600));
+        else if (d >= 3600)   snprintf(t, sizeof t, "%ldh %02ldm", (long)(d / 3600), (long)((d % 3600) / 60));
+        else                  snprintf(t, sizeof t, "%ldm", (long)(d / 60));
+        setText(hp_rst[i], t);
+      } else {
+        setText(hp_pct[i], "--");
+        lv_obj_set_style_text_color(hp_pct[i], C(COL_DIM), 0);
+        setWBar(wb_hp[i], 0);
+        setText(hp_rst[i], "");
+      }
+    }
+    if (m.ctx >= 0) { snprintf(t, sizeof t, "ctx %d%%", m.ctx); setText(hero_ctx, t); } else setText(hero_ctx, "");
   }
 
   // stats tab
