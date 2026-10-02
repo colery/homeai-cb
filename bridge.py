@@ -264,6 +264,8 @@ def reader(ser, stop):
             if not line:
                 continue
             HUB.device['last_rx'] = now()
+            if line.startswith('# ble'):
+                log(f'board: {line[2:]}')     # Bluetooth events the firmware reports
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:

@@ -74,15 +74,18 @@ static void bleTx(const char* s) {
 }
 
 class SecCB : public BLESecurityCallbacks {
-  uint32_t onPassKeyRequest() override { return 0; }
-  void onPassKeyNotify(uint32_t k) override { bleKey = k; showKey = true; }
-  bool onConfirmPIN(uint32_t) override { return true; }
-  bool onSecurityRequest() override { return true; }
-  void onAuthenticationComplete(esp_ble_auth_cmpl_t c) override { if (c.success) { bleSec = true; showKey = false; } }
+  uint32_t onPassKeyRequest() override { Serial.println("# ble: passkey request"); return 0; }
+  void onPassKeyNotify(uint32_t k) override { Serial.printf("# ble: passkey notify %06lu\n", (unsigned long)k); bleKey = k; showKey = true; }
+  bool onConfirmPIN(uint32_t k) override { Serial.printf("# ble: confirm pin %06lu\n", (unsigned long)k); return true; }
+  bool onSecurityRequest() override { Serial.println("# ble: security request"); return true; }
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t c) override {
+    Serial.printf("# ble: auth complete success=%d reason=0x%x\n", (int)c.success, (unsigned)c.fail_reason);
+    if (c.success) { bleSec = true; showKey = false; }
+  }
 };
 class SrvCB : public BLEServerCallbacks {
-  void onConnect(BLEServer*) override { bleConn = true; bleSec = false; showKey = false; connAt = millis(); }
-  void onDisconnect(BLEServer*) override { bleConn = false; bleSec = false; showKey = false; BLEDevice::startAdvertising(); }
+  void onConnect(BLEServer*) override { Serial.println("# ble: connected"); bleConn = true; bleSec = false; showKey = false; connAt = millis(); }
+  void onDisconnect(BLEServer*) override { Serial.println("# ble: disconnected"); bleConn = false; bleSec = false; showKey = false; BLEDevice::startAdvertising(); }
 };
 class RxCB : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* ch) override { std::string v = ch->getValue(); rPush(v.c_str(), v.size()); }
