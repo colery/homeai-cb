@@ -85,10 +85,10 @@ Claude Desktop (macOS/Windows)
 
 For **Linux + Claude Code** (no Claude Desktop):
 ```
-Claude Code CLI
-  → hooks (buddy_*.py) write /tmp/claude_buddy_state.json
-  → bridge.py reads file, sends heartbeats over /dev/ttyUSB0
-  → M5StickC USB serial firmware (same JSON protocol, no BLE)
+Claude Code CLI (any machine)
+  → hooks/buddy_hook.py POSTs events to the hub (bridge.py, :8765, runs on the AM21)
+  → hub keeps per-session state with expiry, pushes heartbeats over USB serial
+  → CYD (firmware-cyd reads USB serial since Oct 2026) or M5StickC; same JSON protocol as BLE
 ```
 
 ---
@@ -101,11 +101,9 @@ Claude Code CLI
 | `firmware-cyd/platformio.ini` | esp32dev, TFT_eSPI, XPT2046, ArduinoJson, 40MHz DMA |
 | `firmware/src/main.cpp` | M5StickC BLE firmware |
 | `firmware/platformio.ini` | m5stick-c board |
-| `bridge.py` | USB serial bridge for Linux/Claude Code mode |
-| `start.sh` / `stop.sh` | Bridge daemon management |
-| `hooks/buddy_pre_tool.py` | PreToolUse — writes tool info to state file |
-| `hooks/buddy_post_tool.py` | PostToolUse — decrements running count |
-| `hooks/buddy_stop.py` | Stop — resets to idle |
+| `bridge.py` | Hub: HTTP in from hooks, per-session state, USB serial out |
+| `deploy/` | `claude-buddy.service` (hub on the AM21), `flash.sh` |
+| `hooks/buddy_hook.py` | Claude Code hook for all events -> hub (never blocks/breaks Claude Code) |
 | `README.md` | Full setup, protocol, and troubleshooting docs |
 
 ---

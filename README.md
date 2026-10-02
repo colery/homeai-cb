@@ -165,34 +165,52 @@ Same pairing process. Device advertises as `Claude-XXYY`.
 
 ## USB Serial mode (Linux / Claude Code)
 
-An alternative mode for Linux hosts without Claude Desktop. Integrates with **Claude Code** (the CLI) via hooks instead of BLE.
+For **Claude Code** (the CLI) instead of Claude Desktop. The CYD and M5StickC firmware both accept the same JSON lines over USB serial that they accept over BLE; the CYD uses whichever link is live (shown as `USB`/`BLE` in the top bar).
 
-### Bridge daemon
-```bash
-pip install pyserial         # if needed
-./start.sh                   # start (uses /dev/ttyUSB0)
-./start.sh /dev/ttyACM0      # custom port
-tail -f /tmp/claude_buddy.log
-./stop.sh
+```
+Claude Code (any machine) --hooks--> HTTP POST :8765/event --> [hub: bridge.py] --USB serial--> buddy
 ```
 
-### Claude Code hooks
-Install the hooks and register them globally:
+The **hub** (`bridge.py`) runs on the machine the buddy is plugged into. Hooks on any machine on the network post small events to it, so several machines and several concurrent sessions all feed one display.
 
+### Hub
 ```bash
-cp hooks/buddy_pre_tool.py  ~/.claude/hooks/
-cp hooks/buddy_post_tool.py ~/.claude/hooks/
-cp hooks/buddy_stop.py      ~/.claude/hooks/
+python3 bridge.py                        # auto-detects the serial port, HTTP on :8765
+python3 bridge.py --port /dev/ttyUSB0 --http-port 8765
+curl localhost:8765/state                # sessions, device link, merged heartbeat
 ```
+Needs `pyserial`. As a service: `deploy/claude-buddy.service` (runs as a user in the `dialout` group, restarts on failure, reconnects if the device is unplugged). The port is opened without asserting DTR/RTS so connecting does not reset the board.
 
-Add to `~/.claude/settings.json`:
+### Status model
+State is tracked per session and merged, and **everything in progress expires**, so an interrupted turn cannot leave the display stuck on WORKING:
+
+| Signal | Source | Effect |
+|---|---|---|
+| `UserPromptSubmit` | hook | session is thinking (WORKING) |
+| `PreToolUse` / `PostToolUse` | hook | tool shown in the activity feed |
+| `Notification` (permission) | hook | APPROVE? screen: tool + command, "answer in terminal"; tap dismisses |
+| `Notification` (idle) / `Stop` | hook | back to IDLE (the idle notification also recovers from an Esc interrupt) |
+| no events | expiry | thinking 120 s, tool call 10 min, permission prompt 10 min, session 1 h |
+
+`r:` is the number of sessions currently working, `w:` the number waiting on a permission prompt. Tokens-today is counted from each session's transcript at Stop (input + output + cache writes).
+
+### Claude Code hook
+One script handles every event and always exits 0 silently (a down hub costs one short timeout, then it backs off for 20 s). In `~/.claude/settings.json`:
 ```json
 "hooks": {
-  "PreToolUse":  [{"matcher":"","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/buddy_pre_tool.py"}]}],
-  "PostToolUse": [{"matcher":"","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/buddy_post_tool.py"}]}],
-  "Stop":        [{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/buddy_stop.py"}]}]
+  "SessionStart":     [{"hooks":[{"type":"command","command":"python3 /path/to/hooks/buddy_hook.py"}]}],
+  "UserPromptSubmit": [{"hooks":[{"type":"command","command":"python3 /path/to/hooks/buddy_hook.py"}]}],
+  "PreToolUse":       [{"matcher":"*","hooks":[{"type":"command","command":"python3 /path/to/hooks/buddy_hook.py"}]}],
+  "PostToolUse":      [{"matcher":"*","hooks":[{"type":"command","command":"python3 /path/to/hooks/buddy_hook.py"}]}],
+  "Notification":     [{"hooks":[{"type":"command","command":"python3 /path/to/hooks/buddy_hook.py"}]}],
+  "Stop":             [{"hooks":[{"type":"command","command":"python3 /path/to/hooks/buddy_hook.py"}]}],
+  "SessionEnd":       [{"hooks":[{"type":"command","command":"python3 /path/to/hooks/buddy_hook.py"}]}]
 }
 ```
+Set `CLAUDE_BUDDY_URL` (default `http://100.64.149.28:8765/event`) to point at a different hub.
+
+### Flashing from the hub machine
+Build with PlatformIO, copy `bootloader/partitions/firmware.bin` (+ `boot_app0.bin`) to the hub, and run `deploy/flash.sh cyd|cyd_new`; it stops the hub, flashes with `esptool`, and restarts it.
 
 ---
 
@@ -258,13 +276,11 @@ claude-buddy/
 │   ├── platformio.ini
 │   └── src/main.cpp
 │
-├── hooks/                     ← Claude Code integration (USB serial mode)
-│   ├── buddy_pre_tool.py
-│   ├── buddy_post_tool.py
-│   └── buddy_stop.py
+├── hooks/
+│   └── buddy_hook.py          ← Claude Code hook (all events -> hub)
 │
-├── bridge.py                  ← USB serial bridge daemon
-├── start.sh / stop.sh         ← bridge management
+├── bridge.py                  ← hub: HTTP in from hooks, USB serial out to the buddy
+├── deploy/                    ← claude-buddy.service, flash.sh
 ```
 
 ---
@@ -284,4 +300,4 @@ The XPT2046 raw X axis may be inverted. Try `#define TCH_FLIP_X true` at the top
 `sudo chmod 666 /dev/ttyUSB0`, or log out and back in (you were added to `dialout`).
 
 **Reflashing when bridge is running**  
-`./stop.sh` before flashing — the bridge holds the serial port open.
+Stop the hub before flashing (`deploy/flash.sh` does this) — it holds the serial port open.

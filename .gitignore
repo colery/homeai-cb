@@ -9,3 +9,7 @@ __pycache__/
 # Runtime state
 /tmp/claude_buddy_state.json
 *.log
+
+firmware-cyd-gui/.pio/
+firmware-cyd-gui/preview/build/
+firmware-cyd-gui/preview/out/

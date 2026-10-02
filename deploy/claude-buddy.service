@@ -1,0 +1,14 @@
+[Unit]
+Description=Claude Buddy hub (Claude Code hooks -> USB serial -> CYD)
+After=network-online.target
+
+[Service]
+User=ryan
+SupplementaryGroups=dialout
+WorkingDirectory=/home/ryan/claude-buddy
+ExecStart=/usr/bin/python3 /home/ryan/claude-buddy/bridge.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
