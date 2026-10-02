@@ -320,10 +320,12 @@ void setup() {
 
   ui_init(onPermission, onDismiss);
   Serial.printf("# ui_init ok heap=%u max=%u\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+  enableLoopWDT();   // a stall prints a backtrace and reboots instead of hanging silently
   Serial.printf("\n{\"hello\":\"claude-buddy\",\"name\":\"%s\"}\n", devName);
 }
 
 void loop() {
+  feedLoopWDT();
   uint32_t now = millis();
 
   while (rAvail() > 0) {
