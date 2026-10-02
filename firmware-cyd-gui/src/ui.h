@@ -25,6 +25,7 @@ struct UiModel {
   // per source: [0] = USB (Claude Code via the hub), [1] = BLE (Claude Desktop)
   uint8_t  run[2], wait[2];
   uint32_t tok[2], tokLife;
+  uint32_t tokBestB;                 // biggest BLE (Claude Desktop) day seen, for scaling the B bar
   char     msg[64];                    // most recent status line from either source (hero title)
   // per source, same indexing as run/wait/tok: [0] = Claude Code (USB), [1] = Claude Desktop (BLE)
   char     msgS[2][64];

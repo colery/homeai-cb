@@ -16,6 +16,7 @@
 #include <BLE2902.h>
 #include <esp_mac.h>
 #include <esp_bt.h>
+#include <Preferences.h>
 #include <lvgl.h>
 #include "ui.h"
 
@@ -107,6 +108,7 @@ struct Buddy {
   char msgS[2][64] = {"", ""}; char entriesS[2][UI_ENTRIES][52] = {}; uint8_t nEntriesS[2] = {0, 0};
   struct Lim { bool has5 = false, has7 = false; float pct5 = 0, pct7 = 0; int32_t rst5 = -1, rst7 = -1; } lim[2];
   int ctx = -1; uint32_t limAt = 0;
+  uint32_t tokMaxB = 0;                                  // biggest BLE day seen (persisted)
   char pId[40] = "", pTool[20] = "", pHint[44] = ""; bool pInfo = false;
   uint16_t approvals = 0, denials = 0;
   uint8_t spark[UI_SPARK] = {}; uint8_t nSpark = 0;
@@ -275,6 +277,7 @@ static void fillModel() {
   um.usbLive = usbLive(); um.bleConn = bleConn; um.bleSec = bleSec; um.showKey = showKey; um.bleKey = bleKey;
   for (int i = 0; i < 2; i++) { um.run[i] = g.runS[i]; um.wait[i] = g.waitS[i]; um.tok[i] = g.tokS[i]; }
   um.tokLife = g.tokTotal;
+  um.tokBestB = g.tokMaxB;
   strlcpy(um.msg, g.msg, sizeof um.msg);
   for (int s = 0; s < 2; s++) {
     strlcpy(um.msgS[s], g.msgS[s], sizeof um.msgS[s]);
@@ -329,6 +332,7 @@ static void initBLE() {
 
 // Debug: if loop() stops advancing, dump the stalled task's saved PC and code-looking stack words.
 static volatile uint32_t loopTicks = 0;
+static Preferences prefs;
 static void samplerTask(void*) {
   uint32_t last = 0; int stuck = 0;
   for (;;) {
@@ -384,6 +388,8 @@ void setup() {
 
   ui_init(onPermission, onDismiss);
   Serial.printf("# ui_init ok heap=%u max=%u\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+  prefs.begin("buddy", false);
+  g.tokMaxB = prefs.getUInt("tokmaxB", 0);
   xTaskCreatePinnedToCore(samplerTask, "samp", 4096, NULL, 1, NULL, 0);
   enableLoopWDT();   // a stall prints a backtrace and reboots instead of hanging silently
   Serial.printf("\n{\"hello\":\"claude-buddy\",\"name\":\"%s\"}\n", devName);
@@ -411,6 +417,11 @@ void loop() {
   if (turnEnd > 0 && now > turnEnd) { turnEnd = 0; g.runS[1] = 0; strncpy(g.msg, "idle", 63); strncpy(g.msgS[1], "idle", 63); }
   if (g.conn && (int32_t)(now - g.lastBeat) > 15000) g.conn = false;
   recompute();
+
+  // remember the biggest Bluetooth (Claude Desktop) day, for scaling the B bar
+  static uint32_t lastSave = 0; static bool maxDirty = false;
+  if (g.tokS[1] > g.tokMaxB) { g.tokMaxB = g.tokS[1]; maxDirty = true; }
+  if (maxDirty && now - lastSave > 30000) { prefs.putUInt("tokmaxB", g.tokMaxB); maxDirty = false; lastSave = now; }
 
   // LEDs
   static uint32_t lastLed = 0; static bool ledOn = false;

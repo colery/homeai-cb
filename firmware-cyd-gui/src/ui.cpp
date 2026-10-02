@@ -762,14 +762,38 @@ static void build_plan_card(lv_obj_t* tab, int y, int src) {
   }
 }
 
+static lv_obj_t *bt_val, *bt_best, *bt_fill;
+static WBar wb_bt;
+
+static void build_ble_card(lv_obj_t* tab, int y) {
+  lv_obj_t* c = card(tab, 8, y, 224, 66);
+  dot(c, 12, 12, 8, COL_BLE);
+  lv_obj_t* h = label(c, "BLE TOKENS", F12, COL_TEXT2);
+  lv_obj_set_pos(h, 26, 8);
+  lv_obj_t* l = label(c, "Today", F12, COL_TEXT);
+  lv_obj_set_pos(l, 12, 26);
+  bt_fill = track_bar(c, 62, 29, 110, 8, COL_BLE);
+  wb_bt = {bt_fill, 0, 0};
+  bt_val = label(c, "0", F12, COL_TEXT);
+  lv_obj_set_width(bt_val, 40);
+  lv_obj_set_style_text_align(bt_val, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_align(bt_val, LV_ALIGN_TOP_RIGHT, -12, 26);
+  l = label(c, "Best day", F12, COL_DIM);
+  lv_obj_set_pos(l, 12, 44);
+  bt_best = label(c, "0", F12, COL_DIM);
+  lv_obj_set_width(bt_best, 60);
+  lv_obj_set_style_text_align(bt_best, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_align(bt_best, LV_ALIGN_TOP_RIGHT, -12, 44);
+}
+
 static void build_stats(lv_obj_t* tab) {
   lv_obj_set_style_pad_all(tab, 0, 0);
   lv_obj_set_scroll_dir(tab, LV_DIR_VER);
 
   build_plan_card(tab, 2, 0);
-  build_plan_card(tab, 98, 1);
+  build_ble_card(tab, 98);
 
-  lv_obj_t* c = card(tab, 8, 194, 224, 96);
+  lv_obj_t* c = card(tab, 8, 170, 224, 96);
   lv_obj_t* h = label(c, LV_SYMBOL_CHARGE " TOKENS TODAY", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   st_tok = label(c, "0", F28, COL_TEXT);
@@ -787,7 +811,7 @@ static void build_stats(lv_obj_t* tab) {
   lv_obj_set_pos(st_leg_b, 130, 74);
 
   // tool calls per minute, last 30 minutes (from the hub)
-  c = card(tab, 8, 296, 224, 92);
+  c = card(tab, 8, 272, 224, 92);
   h = label(c, LV_SYMBOL_PLAY " TOOL CALLS / MIN", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   st_peak = label(c, "", F12, COL_DIM);
@@ -811,7 +835,7 @@ static void build_stats(lv_obj_t* tab) {
   l = label(c, "now", F12, COL_DIM);
   lv_obj_align(l, LV_ALIGN_TOP_RIGHT, -12, 74);
 
-  c = card(tab, 8, 394, 224, 66);
+  c = card(tab, 8, 370, 224, 66);
   h = label(c, LV_SYMBOL_PLAY " SESSIONS", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   dot(c, 12, 31, 7, COL_USB);
@@ -825,7 +849,7 @@ static void build_stats(lv_obj_t* tab) {
   st_ses_b = label(c, "", F12, COL_TEXT2);
   lv_obj_align(st_ses_b, LV_ALIGN_TOP_RIGHT, -12, 44);
 
-  c = card(tab, 8, 466, 224, 84);
+  c = card(tab, 8, 442, 224, 84);
   h = label(c, LV_SYMBOL_OK " DECISIONS", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   l = label(c, "Allow", F12, COL_TEXT);
@@ -843,14 +867,14 @@ static void build_stats(lv_obj_t* tab) {
   st_rate = label(c, "Allow rate  --", F12, COL_TEXT2);
   lv_obj_set_pos(st_rate, 12, 62);
 
-  c = card(tab, 8, 556, 224, 84);
+  c = card(tab, 8, 532, 224, 84);
   h = label(c, LV_SYMBOL_SETTINGS " SYSTEM", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   st_dev  = kv(c, 26, "Device");
   st_link = kv(c, 40, "Link");
   st_up   = kv(c, 54, "Uptime");
   st_beat = kv(c, 68, "Last beat");
-  lv_obj_t* pad = plain(tab, 8, 642, 1, 8);
+  lv_obj_t* pad = plain(tab, 8, 618, 1, 8);
   (void)pad;
 }
 
@@ -1105,7 +1129,7 @@ void ui_update(const UiModel& m) {
   }
 
   // plan usage: the corner bars in the buddy window (5-hour, U left / B right) + a card per side on Stats
-  for (int src = 0; src < 2; src++) {
+  for (int src = 0; src < 1; src++) {
     const UiLimits& L = m.lim[src];
     bool has[2] = {L.has5, L.has7};
     uint8_t pc_[2] = {L.pct5, L.pct7};
@@ -1129,7 +1153,7 @@ void ui_update(const UiModel& m) {
         setText(pl_pct[src][i], "--");
         setWBar(wb_pl[src][i], 0);
         lv_obj_set_style_text_color(pl_pct[src][i], C(COL_DIM), 0);
-        setText(pl_rst[src][i], i == 0 ? (src ? "no usage seen from that side" : "waiting for Claude Code...") : "");
+        setText(pl_rst[src][i], i == 0 ? "no active window yet" : "");
       }
     }
     // corner bar
@@ -1142,6 +1166,19 @@ void ui_update(const UiModel& m) {
       setWBar(wb_hp[src], 0);
       lv_obj_set_style_text_color(gb_lbl[src], C(COL_DIM), 0);
     }
+  }
+  // B: the Bluetooth side has no plan usage (Claude Desktop only reports tokens), so it shows
+  // today's tokens against the biggest day seen, scaled so a quiet history still moves the bar
+  {
+    uint32_t best = m.tokBestB > m.tok[1] ? m.tokBestB : m.tok[1];
+    if (best < 100000) best = 100000;       // floor: a quiet history shouldn't read as a full bar
+    uint32_t tb = m.bleConn ? m.tok[1] : 0;
+    setWBar(wb_hp[1], (int)((uint64_t)tb * 52 / best));
+    lv_obj_set_style_bg_color(gb_fill[1], C(COL_BLE), 0);
+    lv_obj_set_style_text_color(gb_lbl[1], C(m.bleConn ? COL_BLE : COL_DIM), 0);
+    setWBar(wb_bt, (int)((uint64_t)m.tok[1] * 110 / best));
+    fmtTok(t2, sizeof t2, m.tok[1]); setText(bt_val, t2);
+    fmtTok(t2, sizeof t2, m.tokBestB > m.tok[1] ? m.tokBestB : m.tok[1]); setText(bt_best, t2);
   }
   if (m.ctx >= 0) { snprintf(t, sizeof t, "context %d%%", m.ctx); setText(pl_ctx, t); snprintf(t, sizeof t, "ctx %d%%", m.ctx); setText(hero_ctx, t); }
   else { setText(pl_ctx, ""); setText(hero_ctx, ""); }

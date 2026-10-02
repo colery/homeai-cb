@@ -51,7 +51,7 @@ static UiModel base() {
   strcpy(m.devName, "Claude-E72E"); strcpy(m.time, "14:32");
   m.state = UI_IDLE; m.usbLive = true; m.bleConn = true; m.bleSec = true;
   strcpy(m.msg, "idle");
-  m.tok[0] = 48210; m.tok[1] = 12400; m.tokLife = 1420000;
+  m.tok[0] = 48210; m.tok[1] = 12400; m.tokLife = 1420000; m.tokBestB = 88000;
   strcpy(m.msgS[0], "Tool: Bash"); strcpy(m.msgS[1], "thinking...");
   m.nEntriesS[0] = 3; strcpy(m.entriesS[0][0], "14:32 Bash pio run -e cyd"); strcpy(m.entriesS[0][1], "14:31 Edit ui.cpp"); strcpy(m.entriesS[0][2], "14:31 Read main.cpp");
   m.nEntriesS[1] = 2; strcpy(m.entriesS[1][0], "14:30 > summarize the design doc"); strcpy(m.entriesS[1][1], "14:29 assistant reply");
