@@ -102,5 +102,7 @@ int main() {
   m = base(); m.nSpark = 0; memset(m.spark, 0, sizeof m.spark); ui_update(m); ui_set_tab(1); run(300); shot("stats_zero"); ui_set_tab(0);
   m.bleConn = true; m.showKey = true; m.bleKey = 482913;
   ui_update(m); run(300); shot("link_key");
+  m = base(); m.usbLive = true; m.bleConn = true; m.bleSec = false; m.showKey = true; m.bleKey = 120456;
+  ui_update(m); run(300); shot("pair_with_usb");
   return 0;
 }

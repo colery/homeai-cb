@@ -1139,9 +1139,11 @@ void ui_update(const UiModel& m) {
   }
   setFlag(ov_attn, LV_OBJ_FLAG_HIDDEN, !attn);
 
-  // link overlay
-  setFlag(ov_link, LV_OBJ_FLAG_HIDDEN, online);
-  if (!online) {
+  // link overlay: also while a Bluetooth passkey is pending, even if USB is already linked --
+  // otherwise the code you must type into the other machine is never shown
+  bool showLink = !online || (m.bleConn && m.showKey);
+  setFlag(ov_link, LV_OBJ_FLAG_HIDDEN, !showLink);
+  if (showLink) {
     setText(lk_name, m.devName);
     bool key = m.bleConn && m.showKey;
     setFlag(lk_key, LV_OBJ_FLAG_HIDDEN, !key);
