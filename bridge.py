@@ -52,9 +52,39 @@ class Hub:
         self.day = date.today()
         self.rev = 0                       # bumped on every accepted event
         self.calls = deque(maxlen=6000)    # timestamps of tool calls, for the activity chart
-        self.limits = {}                   # account-wide plan windows from Claude Code's status line
+        self.limits = {}                   # host -> {'five'/'seven': {p, r}} from Claude Code's status line
+        # Hosts whose usage feeds the "U" (USB) bar; any other host feeds "B" (Bluetooth side).
+        self._limits_saved = 0.0
+        self._load_limits()
+        self.u_hosts = {h.strip() for h in os.environ.get('BUDDY_U_HOSTS', 'acer-ai').split(',') if h.strip()}
         self.resync = threading.Event()    # device just booted: resend the clock and a heartbeat
         self.device = {'connected': False, 'port': None, 'last_send': 0, 'last_rx': 0}
+
+    LIMITS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'limits.json')
+
+    def _load_limits(self):
+        try:
+            with open(self.LIMITS_FILE) as f:
+                data = json.load(f)
+            now_ = now()
+            for h, wins in data.items():
+                for k, w in wins.items():
+                    if w.get('r', 0) > now_:           # drop windows that already rolled over
+                        self.limits.setdefault(h, {})[k] = w
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def _save_limits(self, ts):
+        if ts - self._limits_saved < 30:
+            return
+        self._limits_saved = ts
+        try:
+            tmp = self.LIMITS_FILE + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(self.limits, f)
+            os.replace(tmp, self.LIMITS_FILE)
+        except OSError:
+            pass
 
     # ── events from hooks ────────────────────────────────────────────────
     def event(self, ev):
@@ -103,10 +133,12 @@ class Hub:
                     s['tools'].clear()
                     s['prompt'] = None
             elif t == 'usage':
+                hl = self.limits.setdefault(s['host'] or 'unknown', {})
                 for k in ('five', 'seven'):
                     w = ev.get(k)
                     if isinstance(w, dict):
-                        self.limits[k] = {'p': float(w.get('p', 0)), 'r': int(w.get('r', 0))}
+                        hl[k] = {'p': float(w.get('p', 0)), 'r': int(w.get('r', 0)), 'seen': ts}
+                self._save_limits(ts)
                 c = ev.get('ctx')
                 if c is not None:
                     s['ctx'] = float(c)
@@ -180,17 +212,34 @@ class Hub:
                 if 0 <= age < 1800:
                     spark[29 - int(age // 60)] += 1
             hb['spark'] = [min(v, 99) for v in spark]
-            lim = {}
-            for key, short in (('five', 'h5'), ('seven', 'd7')):
-                w = self.limits.get(key)
-                if not w:
-                    continue
-                left = w['r'] - ts if w['r'] else -1
-                if w['r'] and left <= 0:       # window rolled over; Claude Code drops it too
-                    self.limits.pop(key, None)
-                    continue
-                lim[short] = round(w['p'], 1)
-                lim[short + 's'] = int(left) if left >= 0 else -1
+            def pack(hosts):
+                """Freshest window per kind among these hosts, as the heartbeat's h5/d7 fields."""
+                out = {}
+                for key, short in (('five', 'h5'), ('seven', 'd7')):
+                    best = None
+                    for h, wins in list(self.limits.items()):
+                        if h not in hosts:
+                            continue
+                        w = wins.get(key)
+                        if not w:
+                            continue
+                        if w['r'] and w['r'] - ts <= 0:      # window rolled over; Claude Code drops it too
+                            wins.pop(key, None)
+                            continue
+                        if best is None or w['seen'] > best['seen']:
+                            best = w
+                    if best:
+                        left = best['r'] - ts if best['r'] else -1
+                        out[short] = round(best['p'], 1)
+                        out[short + 's'] = int(left) if left >= 0 else -1
+                return out
+
+            known = set(self.limits)
+            u_set = known & self.u_hosts if self.u_hosts else known
+            lim = pack(u_set)
+            lim_b = pack(known - u_set)
+            if lim_b:
+                lim['b'] = lim_b
             ctxs = [s for s in live if 'ctx' in s]
             if ctxs:
                 lim['cx'] = round(max(ctxs, key=lambda s: s['last'])['ctx'], 1)

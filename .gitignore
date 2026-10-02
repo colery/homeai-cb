@@ -13,3 +13,4 @@ __pycache__/
 firmware-cyd-gui/.pio/
 firmware-cyd-gui/preview/build/
 firmware-cyd-gui/preview/out/
+limits.json

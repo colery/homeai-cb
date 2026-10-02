@@ -105,7 +105,8 @@ struct Buddy {
   uint8_t runS[2] = {}, waitS[2] = {}; uint32_t tokS[2] = {}; uint8_t pSrc = 0;   // [0]=USB, [1]=BLE
   char msg[64] = "";                                    // latest from either source (hero title)
   char msgS[2][64] = {"", ""}; char entriesS[2][UI_ENTRIES][52] = {}; uint8_t nEntriesS[2] = {0, 0};
-  bool has5 = false, has7 = false; float pct5 = 0, pct7 = 0; int32_t rst5 = -1, rst7 = -1; int ctx = -1; uint32_t limAt = 0;
+  struct Lim { bool has5 = false, has7 = false; float pct5 = 0, pct7 = 0; int32_t rst5 = -1, rst7 = -1; } lim[2];
+  int ctx = -1; uint32_t limAt = 0;
   char pId[40] = "", pTool[20] = "", pHint[44] = ""; bool pInfo = false;
   uint16_t approvals = 0, denials = 0;
   uint8_t spark[UI_SPARK] = {}; uint8_t nSpark = 0;
@@ -189,12 +190,17 @@ static void parseLine(const char* line, bool usb = false) {
 
   if (usb) {
     JsonObject lm = doc["limits"].as<JsonObject>();
+    auto rd = [](JsonObject o, Buddy::Lim& L) {
+      L.has5 = !o["h5"].isNull(); L.pct5 = o["h5"] | 0.0f; L.rst5 = o["h5s"] | -1;
+      L.has7 = !o["d7"].isNull(); L.pct7 = o["d7"] | 0.0f; L.rst7 = o["d7s"] | -1;
+    };
     if (!lm.isNull()) {
-      g.has5 = !lm["h5"].isNull(); g.pct5 = lm["h5"] | 0.0f; g.rst5 = lm["h5s"] | -1;
-      g.has7 = !lm["d7"].isNull(); g.pct7 = lm["d7"] | 0.0f; g.rst7 = lm["d7s"] | -1;
+      rd(lm, g.lim[0]);
+      JsonObject lb = lm["b"].as<JsonObject>();
+      if (!lb.isNull()) rd(lb, g.lim[1]); else g.lim[1] = Buddy::Lim();
       g.ctx = lm["cx"].isNull() ? -1 : (int)(lm["cx"].as<float>() + 0.5f);
       g.limAt = millis();
-    } else { g.has5 = g.has7 = false; g.ctx = -1; }
+    } else { g.lim[0] = g.lim[1] = Buddy::Lim(); g.ctx = -1; }
   }
 
   JsonArray sp = doc["spark"].as<JsonArray>();
@@ -276,11 +282,14 @@ static void fillModel() {
     for (int i = 0; i < g.nEntriesS[s] && i < UI_ENTRIES; i++) strlcpy(um.entriesS[s][i], g.entriesS[s][i], sizeof um.entriesS[s][i]);
   }
   um.pSrc = g.pSrc;
-  um.has5 = g.has5; um.has7 = g.has7;
-  um.pct5 = (uint8_t)(g.pct5 + 0.5f); um.pct7 = (uint8_t)(g.pct7 + 0.5f);
   uint32_t el = (millis() - g.limAt) / 1000;
-  um.rst5 = g.rst5 >= 0 ? (g.rst5 > (int32_t)el ? g.rst5 - el : 0) : -1;
-  um.rst7 = g.rst7 >= 0 ? (g.rst7 > (int32_t)el ? g.rst7 - el : 0) : -1;
+  for (int i = 0; i < 2; i++) {
+    const Buddy::Lim& L = g.lim[i];
+    um.lim[i].has5 = L.has5; um.lim[i].has7 = L.has7;
+    um.lim[i].pct5 = (uint8_t)(L.pct5 + 0.5f); um.lim[i].pct7 = (uint8_t)(L.pct7 + 0.5f);
+    um.lim[i].rst5 = L.rst5 >= 0 ? (L.rst5 > (int32_t)el ? L.rst5 - el : 0) : -1;
+    um.lim[i].rst7 = L.rst7 >= 0 ? (L.rst7 > (int32_t)el ? L.rst7 - el : 0) : -1;
+  }
   um.ctx = g.ctx;
   um.hasPrompt = g.pId[0] != 0; um.pInfo = g.pInfo;
   strlcpy(um.pTool, g.pTool, sizeof um.pTool); strlcpy(um.pHint, g.pHint, sizeof um.pHint); strlcpy(um.pId, g.pId, sizeof um.pId);

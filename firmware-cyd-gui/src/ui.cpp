@@ -118,7 +118,7 @@ static lv_obj_t *whiskers[4], *badge_z, *badge_bang, *chip, *chip_lbl;
 static lv_obj_t *earL, *earR;
 
 // home / plan usage inside the buddy window
-static lv_obj_t *hp_lbl[2], *hp_pct[2], *hp_rst[2], *hp_fill[2], *hero_ctx;
+static lv_obj_t *gb_frame[2], *gb_fill[2], *gb_lbl[2], *hero_ctx;
 
 // home / one card per connected Claude instance
 struct Inst { lv_obj_t *dot, *name, *chip, *chip_lbl, *msg, *entry, *tok, *toktxt; };
@@ -662,18 +662,30 @@ static void build_home(lv_obj_t* tab) {
   chip_lbl = label(chip, "IDLE", F12, COL_TEXT);
   lv_obj_center(chip_lbl);
 
-  // plan usage either side of the buddy: 5-hour on the left, 7-day on the right
-  static const char* hn[2] = {"5 HOUR", "7 DAY"};
+  // video-game style bars in the top corners: U (USB side) left, B (Bluetooth side) right.
+  // Each shows the 5-hour plan window of that side; the right one fills from the right edge.
   for (int i = 0; i < 2; i++) {
-    int x = i ? 158 : 12;
-    hp_lbl[i] = label(hero, hn[i], F12, COL_TEXT2);
-    lv_obj_set_pos(hp_lbl[i], x, 30);
-    hp_pct[i] = label(hero, "--", F20, COL_DIM);
-    lv_obj_set_pos(hp_pct[i], x, 44);
-    hp_fill[i] = track_bar(hero, x, 72, 52, 6, COL_OK);
-    wb_hp[i] = {hp_fill[i], 0, 0};
-    hp_rst[i] = label(hero, "", F12, COL_DIM);
-    lv_obj_set_pos(hp_rst[i], x, 82);
+    const int bw = 54, bh = 10;
+    int bx = i ? 224 - 22 - bw : 22;
+    gb_lbl[i] = label(hero, i ? "B" : "U", F12, i ? COL_BLE : COL_USB);
+    lv_obj_set_pos(gb_lbl[i], i ? 224 - 14 : 8, 26);
+    gb_frame[i] = plain(hero, bx, 28, bw, bh);
+    lv_obj_set_style_radius(gb_frame[i], 5, 0);
+    lv_obj_set_style_bg_opa(gb_frame[i], LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(gb_frame[i], C(0x070b18), 0);
+    lv_obj_set_style_border_width(gb_frame[i], 1, 0);
+    lv_obj_set_style_border_color(gb_frame[i], C(0x3a4a80), 0);
+    lv_obj_set_style_clip_corner(gb_frame[i], true, 0);
+    gb_fill[i] = plain(gb_frame[i], 0, 0, 0, bh - 2);
+    lv_obj_set_style_bg_opa(gb_fill[i], LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(gb_fill[i], C(COL_OK), 0);
+    lv_obj_align(gb_fill[i], i ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, 0, 0);
+    wb_hp[i] = {gb_fill[i], 0, 0};
+    for (int k = 1; k <= 3; k++) {                       // segment ticks at 25/50/75%
+      lv_obj_t* tk = plain(gb_frame[i], (bw - 2) * k / 4, 0, 1, bh - 2);
+      lv_obj_set_style_bg_opa(tk, LV_OPA_COVER, 0);
+      lv_obj_set_style_bg_color(tk, C(0x070b18), 0);
+    }
   }
 
   build_inst(tab, 0, 134);
@@ -721,35 +733,43 @@ static lv_obj_t* track_bar(lv_obj_t* c, int x, int y, int w, int h, uint32_t col
   return f;
 }
 
-static lv_obj_t *pl_pct[2], *pl_rst[2], *pl_ctx, *pl_fill[2];
-static WBar wb_pl[2];
+static lv_obj_t *pl_pct[2][2], *pl_rst[2][2], *pl_fill[2][2], *pl_ctx;
+static WBar wb_pl[2][2];
+
+static void build_plan_card(lv_obj_t* tab, int y, int src) {
+  uint32_t col = src ? COL_BLE : COL_USB;
+  lv_obj_t* pc = card(tab, 8, y, 224, 90);
+  dot(pc, 12, 12, 8, col);
+  lv_obj_t* ph = label(pc, src ? "BLE USAGE" : "USB USAGE", F12, COL_TEXT2);
+  lv_obj_set_pos(ph, 26, 8);
+  if (src == 0) {
+    pl_ctx = label(pc, "", F12, COL_DIM);
+    lv_obj_align(pl_ctx, LV_ALIGN_TOP_RIGHT, -12, 8);
+  }
+  static const char* pn[2] = {"5 hour", "7 day"};
+  for (int i = 0; i < 2; i++) {
+    int yy = 26 + i * 30;
+    lv_obj_t* l = label(pc, pn[i], F12, COL_TEXT);
+    lv_obj_set_pos(l, 12, yy);
+    pl_fill[src][i] = track_bar(pc, 62, yy + 3, 110, 8, COL_OK);
+    wb_pl[src][i] = {pl_fill[src][i], 0, 0};
+    pl_pct[src][i] = label(pc, "--", F12, COL_TEXT);
+    lv_obj_set_width(pl_pct[src][i], 40);
+    lv_obj_set_style_text_align(pl_pct[src][i], LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(pl_pct[src][i], LV_ALIGN_TOP_RIGHT, -12, yy);
+    pl_rst[src][i] = label(pc, "", F12, COL_DIM);
+    lv_obj_set_pos(pl_rst[src][i], 12, yy + 14);
+  }
+}
 
 static void build_stats(lv_obj_t* tab) {
   lv_obj_set_style_pad_all(tab, 0, 0);
   lv_obj_set_scroll_dir(tab, LV_DIR_VER);
 
-  // plan usage windows from Claude Code's status line (Pro/Max)
-  lv_obj_t* pc = card(tab, 8, 2, 224, 90);
-  lv_obj_t* ph = label(pc, LV_SYMBOL_LOOP " PLAN USAGE", F12, COL_TEXT2);
-  lv_obj_set_pos(ph, 12, 8);
-  pl_ctx = label(pc, "", F12, COL_DIM);
-  lv_obj_align(pl_ctx, LV_ALIGN_TOP_RIGHT, -12, 8);
-  static const char* pn[2] = {"5 hour", "7 day"};
-  for (int i = 0; i < 2; i++) {
-    int y = 26 + i * 30;
-    lv_obj_t* l = label(pc, pn[i], F12, COL_TEXT);
-    lv_obj_set_pos(l, 12, y);
-    pl_fill[i] = track_bar(pc, 62, y + 3, 110, 8, COL_OK);
-    wb_pl[i] = {pl_fill[i], 0, 0};
-    pl_pct[i] = label(pc, "--", F12, COL_TEXT);
-    lv_obj_set_width(pl_pct[i], 40);
-    lv_obj_set_style_text_align(pl_pct[i], LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(pl_pct[i], LV_ALIGN_TOP_RIGHT, -12, y);
-    pl_rst[i] = label(pc, "", F12, COL_DIM);
-    lv_obj_set_pos(pl_rst[i], 12, y + 14);
-  }
+  build_plan_card(tab, 2, 0);
+  build_plan_card(tab, 98, 1);
 
-  lv_obj_t* c = card(tab, 8, 98, 224, 96);
+  lv_obj_t* c = card(tab, 8, 194, 224, 96);
   lv_obj_t* h = label(c, LV_SYMBOL_CHARGE " TOKENS TODAY", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   st_tok = label(c, "0", F28, COL_TEXT);
@@ -767,7 +787,7 @@ static void build_stats(lv_obj_t* tab) {
   lv_obj_set_pos(st_leg_b, 130, 74);
 
   // tool calls per minute, last 30 minutes (from the hub)
-  c = card(tab, 8, 200, 224, 92);
+  c = card(tab, 8, 296, 224, 92);
   h = label(c, LV_SYMBOL_PLAY " TOOL CALLS / MIN", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   st_peak = label(c, "", F12, COL_DIM);
@@ -791,7 +811,7 @@ static void build_stats(lv_obj_t* tab) {
   l = label(c, "now", F12, COL_DIM);
   lv_obj_align(l, LV_ALIGN_TOP_RIGHT, -12, 74);
 
-  c = card(tab, 8, 298, 224, 66);
+  c = card(tab, 8, 394, 224, 66);
   h = label(c, LV_SYMBOL_PLAY " SESSIONS", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   dot(c, 12, 31, 7, COL_USB);
@@ -805,7 +825,7 @@ static void build_stats(lv_obj_t* tab) {
   st_ses_b = label(c, "", F12, COL_TEXT2);
   lv_obj_align(st_ses_b, LV_ALIGN_TOP_RIGHT, -12, 44);
 
-  c = card(tab, 8, 370, 224, 84);
+  c = card(tab, 8, 466, 224, 84);
   h = label(c, LV_SYMBOL_OK " DECISIONS", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   l = label(c, "Allow", F12, COL_TEXT);
@@ -823,14 +843,14 @@ static void build_stats(lv_obj_t* tab) {
   st_rate = label(c, "Allow rate  --", F12, COL_TEXT2);
   lv_obj_set_pos(st_rate, 12, 62);
 
-  c = card(tab, 8, 460, 224, 84);
+  c = card(tab, 8, 556, 224, 84);
   h = label(c, LV_SYMBOL_SETTINGS " SYSTEM", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   st_dev  = kv(c, 26, "Device");
   st_link = kv(c, 40, "Link");
   st_up   = kv(c, 54, "Uptime");
   st_beat = kv(c, 68, "Last beat");
-  lv_obj_t* pad = plain(tab, 8, 546, 1, 8);
+  lv_obj_t* pad = plain(tab, 8, 642, 1, 8);
   (void)pad;
 }
 
@@ -1084,58 +1104,47 @@ void ui_update(const UiModel& m) {
     setNum(n_tok_inst[i], m.tok[i]);
   }
 
-  // plan usage
-  {
-    bool has[2] = {m.has5, m.has7};
-    uint8_t pc_[2] = {m.pct5, m.pct7};
-    int32_t rs[2] = {m.rst5, m.rst7};
+  // plan usage: the corner bars in the buddy window (5-hour, U left / B right) + a card per side on Stats
+  for (int src = 0; src < 2; src++) {
+    const UiLimits& L = m.lim[src];
+    bool has[2] = {L.has5, L.has7};
+    uint8_t pc_[2] = {L.pct5, L.pct7};
+    int32_t rs[2] = {L.rst5, L.rst7};
     for (int i = 0; i < 2; i++) {
       if (has[i]) {
-        snprintf(t, sizeof t, "%u%%", pc_[i]); setText(pl_pct[i], t);
-        setWBar(wb_pl[i], pc_[i] * 110 / 100);
+        snprintf(t, sizeof t, "%u%%", pc_[i]); setText(pl_pct[src][i], t);
+        setWBar(wb_pl[src][i], pc_[i] * 110 / 100);
         uint32_t col = pc_[i] >= 90 ? COL_BAD : (pc_[i] >= 70 ? 0xffc83d : COL_OK);
-        lv_obj_set_style_bg_color(pl_fill[i], C(col), 0);
-        lv_obj_set_style_text_color(pl_pct[i], C(col), 0);
-        if (rs[i] < 0) setText(pl_rst[i], "");
+        lv_obj_set_style_bg_color(pl_fill[src][i], C(col), 0);
+        lv_obj_set_style_text_color(pl_pct[src][i], C(col), 0);
+        if (rs[i] < 0) setText(pl_rst[src][i], "");
         else {
           int32_t d = rs[i];
           if (d >= 86400)      snprintf(t, sizeof t, "resets in %ldd %ldh", (long)(d / 86400), (long)((d % 86400) / 3600));
           else if (d >= 3600)  snprintf(t, sizeof t, "resets in %ldh %02ldm", (long)(d / 3600), (long)((d % 3600) / 60));
           else                 snprintf(t, sizeof t, "resets in %ldm", (long)(d / 60));
-          setText(pl_rst[i], t);
+          setText(pl_rst[src][i], t);
         }
       } else {
-        setText(pl_pct[i], "--");
-        setWBar(wb_pl[i], 0);
-        lv_obj_set_style_text_color(pl_pct[i], C(COL_DIM), 0);
-        setText(pl_rst[i], i == 0 ? "waiting for Claude Code..." : "");
+        setText(pl_pct[src][i], "--");
+        setWBar(wb_pl[src][i], 0);
+        lv_obj_set_style_text_color(pl_pct[src][i], C(COL_DIM), 0);
+        setText(pl_rst[src][i], i == 0 ? (src ? "no usage seen from that side" : "waiting for Claude Code...") : "");
       }
     }
-    if (m.ctx >= 0) { snprintf(t, sizeof t, "context %d%%", m.ctx); setText(pl_ctx, t); } else setText(pl_ctx, "");
-
-    // same numbers inside the buddy window
-    for (int i = 0; i < 2; i++) {
-      if (has[i]) {
-        uint32_t col = pc_[i] >= 90 ? COL_BAD : (pc_[i] >= 70 ? 0xffc83d : COL_OK);
-        snprintf(t, sizeof t, "%u%%", pc_[i]); setText(hp_pct[i], t);
-        lv_obj_set_style_text_color(hp_pct[i], C(col), 0);
-        setWBar(wb_hp[i], pc_[i] * 52 / 100);
-        lv_obj_set_style_bg_color(hp_fill[i], C(col), 0);
-        int32_t d = rs[i];
-        if (d < 0)            t[0] = 0;
-        else if (d >= 86400)  snprintf(t, sizeof t, "%ldd %ldh", (long)(d / 86400), (long)((d % 86400) / 3600));
-        else if (d >= 3600)   snprintf(t, sizeof t, "%ldh %02ldm", (long)(d / 3600), (long)((d % 3600) / 60));
-        else                  snprintf(t, sizeof t, "%ldm", (long)(d / 60));
-        setText(hp_rst[i], t);
-      } else {
-        setText(hp_pct[i], "--");
-        lv_obj_set_style_text_color(hp_pct[i], C(COL_DIM), 0);
-        setWBar(wb_hp[i], 0);
-        setText(hp_rst[i], "");
-      }
+    // corner bar
+    if (L.has5) {
+      uint32_t col = L.pct5 >= 90 ? COL_BAD : (L.pct5 >= 70 ? 0xffc83d : COL_OK);
+      setWBar(wb_hp[src], L.pct5 * 52 / 100);
+      lv_obj_set_style_bg_color(gb_fill[src], C(col), 0);
+      lv_obj_set_style_text_color(gb_lbl[src], C(src ? COL_BLE : COL_USB), 0);
+    } else {
+      setWBar(wb_hp[src], 0);
+      lv_obj_set_style_text_color(gb_lbl[src], C(COL_DIM), 0);
     }
-    if (m.ctx >= 0) { snprintf(t, sizeof t, "ctx %d%%", m.ctx); setText(hero_ctx, t); } else setText(hero_ctx, "");
   }
+  if (m.ctx >= 0) { snprintf(t, sizeof t, "context %d%%", m.ctx); setText(pl_ctx, t); snprintf(t, sizeof t, "ctx %d%%", m.ctx); setText(hero_ctx, t); }
+  else { setText(pl_ctx, ""); setText(hero_ctx, ""); }
 
   // stats tab
   setNum(n_tok_stats, tokTotal);

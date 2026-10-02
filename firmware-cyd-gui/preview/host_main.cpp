@@ -56,7 +56,7 @@ static UiModel base() {
   m.nEntriesS[0] = 3; strcpy(m.entriesS[0][0], "14:32 Bash pio run -e cyd"); strcpy(m.entriesS[0][1], "14:31 Edit ui.cpp"); strcpy(m.entriesS[0][2], "14:31 Read main.cpp");
   m.nEntriesS[1] = 2; strcpy(m.entriesS[1][0], "14:30 > summarize the design doc"); strcpy(m.entriesS[1][1], "14:29 assistant reply");
   m.run[0] = 1; m.run[1] = 0; m.wait[0] = 0; m.wait[1] = 0;
-  m.has5 = true; m.pct5 = 24; m.rst5 = 7997; m.has7 = true; m.pct7 = 41; m.rst7 = 249997; m.ctx = 18;
+  m.lim[0] = {true, true, 24, 41, 7997, 249997}; m.lim[1] = {true, false, 71, 0, 3000, -1}; m.ctx = 18;
   m.approvals = 14; m.denials = 3; m.uptimeS = 5025; m.beatAgeS = 1;
   m.logCount = 6; for (int i = 0; i < 6; i++) m.logLines[i] = LOG[i];
   m.logSeq = 1;
@@ -78,7 +78,7 @@ int main() {
   UiModel m = base();
   ui_update(m); run(300); shot("idle");
 
-  m.state = UI_BUSY; strcpy(m.msg, "Tool: Bash"); m.run[0] = 1; m.run[1] = 1; strcpy(m.msgS[1], "thinking..."); m.pct5 = 74; m.pct7 = 93;
+  m.state = UI_BUSY; strcpy(m.msg, "Tool: Bash"); m.run[0] = 1; m.run[1] = 1; strcpy(m.msgS[1], "thinking..."); m.lim[0].pct5 = 74; m.lim[1].pct5 = 96;
   ui_update(m); run(500); shot("busy");
 
   m.state = UI_ATTN; m.hasPrompt = true; m.pInfo = true; m.wait[0] = 1;

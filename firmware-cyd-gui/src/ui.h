@@ -10,6 +10,12 @@ enum UiState { UI_SLEEP = 0, UI_IDLE, UI_BUSY, UI_ATTN };
 #define UI_LOG_LINES 50
 #define UI_SPARK     30
 
+struct UiLimits {
+  bool     has5, has7;
+  uint8_t  pct5, pct7;
+  int32_t  rst5, rst7;                // seconds until the window resets, -1 unknown
+};
+
 struct UiModel {
   UiState  state;
   char     devName[20];
@@ -25,10 +31,8 @@ struct UiModel {
   char     entriesS[2][UI_ENTRIES][52];
   uint8_t  nEntriesS[2];
   uint8_t  pSrc;                       // source of the pending permission prompt
-  // plan usage from Claude Code's status line (via the hub)
-  bool     has5, has7;
-  uint8_t  pct5, pct7;
-  int32_t  rst5, rst7;                 // seconds until the window resets, -1 unknown
+  // plan usage from Claude Code's status line (via the hub): [0] = USB-side host(s), [1] = the other machine(s)
+  UiLimits lim[2];
   int8_t   ctx;                        // context window fill %, -1 unknown
   bool     hasPrompt, pInfo;
   char     pTool[20], pHint[44], pId[40];
