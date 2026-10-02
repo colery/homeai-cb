@@ -8,6 +8,7 @@ enum UiState { UI_SLEEP = 0, UI_IDLE, UI_BUSY, UI_ATTN };
 
 #define UI_ENTRIES   5
 #define UI_LOG_LINES 50
+#define UI_SPARK     30
 
 struct UiModel {
   UiState  state;
@@ -29,6 +30,8 @@ struct UiModel {
   const char* logLines[UI_LOG_LINES];  // newest first
   uint8_t  logCount;
   uint32_t logSeq;                   // bump when the log changes
+  uint8_t  spark[UI_SPARK];          // tool calls per minute, oldest first (from the hub)
+  uint8_t  nSpark;
 };
 
 typedef void (*UiPermCb)(bool allow);

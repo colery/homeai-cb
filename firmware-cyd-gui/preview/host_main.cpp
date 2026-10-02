@@ -61,6 +61,9 @@ static UiModel base() {
   m.approvals = 14; m.denials = 3; m.uptimeS = 5025; m.beatAgeS = 1;
   m.logCount = 6; for (int i = 0; i < 6; i++) m.logLines[i] = LOG[i];
   m.logSeq = 1;
+  m.nSpark = 30;
+  static const uint8_t sp[30] = {0,0,1,0,2,4,3,5,2,1,0,0,3,6,8,5,4,2,1,3,7,9,6,4,2,5,8,6,3,4};
+  memcpy(m.spark, sp, 30);
   return m;
 }
 
@@ -93,8 +96,10 @@ int main() {
   ui_set_tab(2); run(500); shot("log");
   ui_set_tab(0);
 
-  m = base(); m.usbLive = false; m.bleConn = false; m.bleSec = false;
+  m = base(); strncpy(m.entries[0], "08:43 Bash cd /home/ryan/github/homeai-cb && git add -A", 51); strncpy(m.msg, "Tool: Bash a very long message that cannot fit in the title bar at all", 63); ui_update(m); run(300); shot("longtext");
+  m = base(); m.nSpark = 0; memset(m.spark, 0, sizeof m.spark); m.usbLive = false; m.bleConn = false; m.bleSec = false;
   ui_update(m); run(300); shot("link_wait");
+  m = base(); m.nSpark = 0; memset(m.spark, 0, sizeof m.spark); ui_update(m); ui_set_tab(1); run(300); shot("stats_zero"); ui_set_tab(0);
   m.bleConn = true; m.showKey = true; m.bleKey = 482913;
   ui_update(m); run(300); shot("link_key");
   return 0;

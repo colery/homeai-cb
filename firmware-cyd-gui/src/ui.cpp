@@ -12,7 +12,7 @@
 #define COL_TITLEBAR 0x1f2a4d
 #define COL_TEXT     0xe8eeff
 #define COL_TEXT2    0x93a0c8
-#define COL_DIM      0x4d5a85
+#define COL_DIM      0x6f7ca8
 #define COL_USB      0x2ee6d6
 #define COL_BLE      0xb48cff
 #define COL_OK       0x3ddc84
@@ -76,6 +76,25 @@ static void setText(lv_obj_t* l, const char* t) {
   if (strcmp(lv_label_get_text(l), t) != 0) lv_label_set_text(l, t);
 }
 
+// The built-in "dots" long mode for labels loops forever while rendering on the ESP32 (it
+// worked on the host), so labels are hard-clipped and long text is cut with "..." here.
+static void clipText(lv_obj_t* l, const char* txt, int maxw) {
+  const lv_font_t* f = lv_obj_get_style_text_font(l, LV_PART_MAIN);
+  char buf[100];
+  size_t n = strlen(txt);
+  if (n >= sizeof buf - 4) n = sizeof buf - 4;
+  memcpy(buf, txt, n);
+  buf[n] = 0;
+  if ((int)lv_text_get_width(buf, n, f, 0) > maxw) {
+    int dots = (int)lv_text_get_width("...", 3, f, 0);
+    while (n > 1 && (int)lv_text_get_width(buf, n, f, 0) + dots > maxw) n--;
+    while (n > 0 && (buf[n] & 0xC0) == 0x80) n--;     // never cut inside a UTF-8 sequence
+    buf[n] = 0;
+    strcat(buf, "...");
+  }
+  setText(l, buf);
+}
+
 static void fmtTok(char* o, size_t n, uint32_t t) {
   if (t >= 1000000)      snprintf(o, n, "%.1fM", t / 1e6f);
   else if (t >= 10000)   snprintf(o, n, "%luK", (unsigned long)(t / 1000));
@@ -119,8 +138,11 @@ static lv_obj_t *ov_attn, *at_card, *at_tool, *at_hint, *at_note, *at_btn_info, 
 static lv_obj_t *ov_link, *lk_name, *lk_status, *lk_key, *lk_spin, *lk_usb, *lk_ble;
 
 // ── Mascot ─────────────────────────────────────────────────────────────────
-LV_DRAW_BUF_DEFINE_STATIC(ear_buf_l, 20, 18, LV_COLOR_FORMAT_ARGB8888);
-LV_DRAW_BUF_DEFINE_STATIC(ear_buf_r, 20, 18, LV_COLOR_FORMAT_ARGB8888);
+#define MS_CX 112
+#define MS_CY 63
+
+LV_DRAW_BUF_DEFINE_STATIC(ear_buf_l, 24, 22, LV_COLOR_FORMAT_ARGB8888);
+LV_DRAW_BUF_DEFINE_STATIC(ear_buf_r, 24, 22, LV_COLOR_FORMAT_ARGB8888);
 
 static lv_obj_t* make_ear(lv_obj_t* parent, lv_draw_buf_t* buf, bool left) {
   lv_obj_t* c = lv_canvas_create(parent);
@@ -133,29 +155,20 @@ static lv_obj_t* make_ear(lv_obj_t* parent, lv_draw_buf_t* buf, bool left) {
   lv_draw_triangle_dsc_init(&t);
   t.color = C(0x34437a);
   t.opa = LV_OPA_COVER;
-  if (left) { t.p[0] = {1, 17}; t.p[1] = {3, 1};  t.p[2] = {18, 17}; }
-  else      { t.p[0] = {18, 17}; t.p[1] = {16, 1}; t.p[2] = {1, 17}; }
+  if (left) { t.p[0] = {1, 21};  t.p[1] = {4, 1};  t.p[2] = {22, 21}; }
+  else      { t.p[0] = {22, 21}; t.p[1] = {19, 1}; t.p[2] = {1, 21}; }
   lv_draw_triangle(&layer, &t);
 
   lv_draw_triangle_dsc_t in;
   lv_draw_triangle_dsc_init(&in);
   in.color = C(0x8a4f78);
   in.opa = LV_OPA_COVER;
-  if (left) { in.p[0] = {5, 16}; in.p[1] = {6, 7};  in.p[2] = {13, 16}; }
-  else      { in.p[0] = {14, 16}; in.p[1] = {13, 7}; in.p[2] = {6, 16}; }
+  if (left) { in.p[0] = {6, 20};  in.p[1] = {8, 8};  in.p[2] = {17, 20}; }
+  else      { in.p[0] = {17, 20}; in.p[1] = {15, 8}; in.p[2] = {6, 20}; }
   lv_draw_triangle(&layer, &in);
 
   lv_canvas_finish_layer(c, &layer);
   return c;
-}
-
-static lv_obj_t* make_eye(lv_obj_t* head_, int dx) {
-  lv_obj_t* e = plain(head_, 0, 0, 8, 12);
-  lv_obj_set_style_radius(e, 4, 0);
-  lv_obj_set_style_bg_opa(e, LV_OPA_COVER, 0);
-  lv_obj_set_style_bg_color(e, C(0xeaf0ff), 0);
-  lv_obj_align(e, LV_ALIGN_CENTER, dx, -3);
-  return e;
 }
 
 static lv_obj_t* make_line(lv_obj_t* parent, const lv_point_precise_t* pts, int n, int w, uint32_t col) {
@@ -167,39 +180,164 @@ static lv_obj_t* make_line(lv_obj_t* parent, const lv_point_precise_t* pts, int 
   return l;
 }
 
+static lv_obj_t *eyes[2], *pups[2], *dots3[3], *mas, *mouth_o;
+static inline lv_obj_t* mouth_arc() { return mouth_o; }
+
+static void make_eye(lv_obj_t* head_, int i, int dx) {
+  lv_obj_t* e = plain(head_, 0, 0, 10, 14);
+  lv_obj_set_style_radius(e, 5, 0);
+  lv_obj_set_style_bg_opa(e, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(e, C(0xeaf0ff), 0);
+  lv_obj_align(e, LV_ALIGN_CENTER, dx, -4);
+  lv_obj_t* p = plain(e, 0, 0, 6, 7);
+  lv_obj_set_style_radius(p, 3, 0);
+  lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(p, C(0x141b3a), 0);
+  lv_obj_center(p);
+  eyes[i] = e;
+  pups[i] = p;
+}
+
+static uint32_t g_acc = 0x4aa8ff;
 static void anim_ring_rot(void* o, int32_t v) { lv_arc_set_rotation((lv_obj_t*)o, v); }
 // Pulses recolor instead of fading object opacity: an opacity < 255 makes LVGL render the
 // object into a temporary layer buffer, which the ESP32 (BLE running) has no spare RAM for.
-static uint32_t g_acc = 0x4aa8ff;
 static void anim_ring_pulse(void* o, int32_t v) {
   lv_obj_set_style_arc_color((lv_obj_t*)o, lv_color_mix(C(g_acc), C(0x1c2546), (uint8_t)v), LV_PART_INDICATOR);
 }
 static void anim_bg_pulse(void* o, int32_t v) {
   lv_obj_set_style_bg_color((lv_obj_t*)o, lv_color_mix(C(ACC[UI_ATTN]), C(0x4a3208), (uint8_t)v), 0);
 }
-static void anim_h(void* o, int32_t v)        { lv_obj_set_height((lv_obj_t*)o, v); }
-static void anim_y_off(void* o, int32_t v)    { lv_obj_set_style_translate_y((lv_obj_t*)o, v, 0); }
+static void anim_y_off(void* o, int32_t v)  { lv_obj_set_style_translate_y((lv_obj_t*)o, v, 0); }
+static void anim_x_off(void* o, int32_t v)  { lv_obj_set_style_translate_x((lv_obj_t*)o, v, 0); }
+static void anim_bounce(void* o, int32_t v) { lv_obj_set_style_translate_y((lv_obj_t*)o, v, 0); }
+static void anim_eye_h(void* o, int32_t v) {
+  lv_obj_t* e = (lv_obj_t*)o;
+  lv_obj_set_height(e, v);
+  lv_obj_t* p = lv_obj_get_child(e, 0);
+  if (p) { if (v < 8) lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(p, LV_OBJ_FLAG_HIDDEN); }
+}
+static void anim_shadow(void* o, int32_t v) { lv_obj_set_style_shadow_width((lv_obj_t*)o, v, 0); }
+
+static int  g_eyeH = 14;
+static bool g_happy = false;
+static uint32_t g_happyUntil = 0, g_nextLook = 0, g_nextTwitch = 0;
+static int  look_cx = 0, look_cy = 0, look_tx = 0, look_ty = 0;   // quarter pixels
+
+static void apply_eyes(UiState s, bool happy) {
+  bool sleep = s == UI_SLEEP, busy = s == UI_BUSY, attn = s == UI_ATTN;
+  int ew = 10, eh = 14; bool pup = true;
+  if (sleep)      { eh = 2;  pup = false; }
+  else if (busy)  { ew = 12; eh = 8; }
+  else if (attn)  { ew = 11; eh = 18; }
+  if (happy)      { ew = 12; eh = 4; pup = false; }
+  g_eyeH = eh;
+  uint32_t ec = busy ? 0xc8ffe0 : (sleep ? 0x8794bd : 0xeaf0ff);
+  for (int i = 0; i < 2; i++) {
+    lv_anim_delete(eyes[i], anim_eye_h);
+    lv_obj_set_size(eyes[i], ew, eh);
+    lv_obj_set_style_bg_color(eyes[i], C(ec), 0);
+    lv_obj_align(eyes[i], LV_ALIGN_CENTER, i ? 11 : -11, sleep ? -2 : -4);
+    if (pup) lv_obj_remove_flag(pups[i], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(pups[i], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_center(pups[i]);
+  }
+  // mouth
+  if (happy)      { lv_arc_set_bg_angles(mouth_arc(), 15, 165); lv_arc_set_angles(mouth_arc(), 15, 165); lv_obj_set_size(mouth_arc(), 22, 22); lv_obj_align(mouth_arc(), LV_ALIGN_CENTER, 0, 5); }
+  else if (attn)  { lv_arc_set_bg_angles(mouth_arc(), 0, 360); lv_arc_set_angles(mouth_arc(), 0, 360); lv_obj_set_size(mouth_arc(), 10, 10); lv_obj_align(mouth_arc(), LV_ALIGN_CENTER, 0, 12); }
+  else if (sleep) { lv_arc_set_bg_angles(mouth_arc(), 60, 120); lv_arc_set_angles(mouth_arc(), 60, 120); lv_obj_set_size(mouth_arc(), 18, 18); lv_obj_align(mouth_arc(), LV_ALIGN_CENTER, 0, 6); }
+  else            { lv_arc_set_bg_angles(mouth_arc(), 30, 150); lv_arc_set_angles(mouth_arc(), 30, 150); lv_obj_set_size(mouth_arc(), 18, 18); lv_obj_align(mouth_arc(), LV_ALIGN_CENTER, 0, 6); }
+  lv_obj_set_style_arc_color(mouth_arc(), C(attn ? ACC[s] : 0xeaf0ff), LV_PART_INDICATOR);
+}
 
 static void blink_cb(lv_timer_t*) {
-  if (g_state != UI_IDLE && g_state != UI_ATTN) return;
-  lv_obj_t* eyes[2] = {eyeL, eyeR};
-  int h0 = (g_state == UI_ATTN) ? 16 : 12;
-  for (auto e : eyes) {
+  if ((g_state != UI_IDLE && g_state != UI_ATTN) || g_happy) return;
+  for (int i = 0; i < 2; i++) {
     lv_anim_t a;
     lv_anim_init(&a);
-    lv_anim_set_var(&a, e);
-    lv_anim_set_exec_cb(&a, anim_h);
-    lv_anim_set_values(&a, h0, 2);
+    lv_anim_set_var(&a, eyes[i]);
+    lv_anim_set_exec_cb(&a, anim_eye_h);
+    lv_anim_set_values(&a, g_eyeH, 2);
     lv_anim_set_duration(&a, 90);
-    lv_anim_set_reverse_duration(&a, 110);
+    lv_anim_set_reverse_duration(&a, 120);
     lv_anim_start(&a);
   }
 }
 
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+static void twitch_ear(lv_obj_t* ear) {
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, ear);
+  lv_anim_set_exec_cb(&a, anim_y_off);
+  lv_anim_set_values(&a, 0, -3);
+  lv_anim_set_duration(&a, 110);
+  lv_anim_set_reverse_duration(&a, 140);
+  lv_anim_start(&a);
+}
+
+// Runs every 50 ms: where the pupils look (touch, idle wandering, "reading" while working),
+// the thinking dots, and now and then an ear twitch.
+static void mascot_tick(lv_timer_t*) {
+  uint32_t now = lv_tick_get();
+
+  bool touching = false; lv_point_t tp = {0, 0};
+  lv_indev_t* in = lv_indev_get_next(NULL);
+  if (in && lv_indev_get_state(in) == LV_INDEV_STATE_PRESSED) { lv_indev_get_point(in, &tp); touching = true; }
+
+  lv_area_t ar; lv_obj_get_coords(head, &ar);
+  int hx = (ar.x1 + ar.x2) / 2, hy = (ar.y1 + ar.y2) / 2;
+
+  if (g_state == UI_SLEEP) { look_tx = look_ty = 0; }
+  else if (touching)       { look_tx = clampi((tp.x - hx) / 10, -2, 2) * 4; look_ty = clampi((tp.y - hy) / 16, -3, 3) * 4; }
+  else if (g_state == UI_BUSY) { look_tx = ((now / 480) & 1) ? 8 : -8; look_ty = 4; }
+  else if (g_state == UI_ATTN) { look_tx = look_ty = 0; }
+  else if (now > g_nextLook) {
+    static const int8_t L[6][2] = {{0, 0}, {-8, 0}, {8, 0}, {-8, -8}, {8, -8}, {0, 8}};
+    int k = lv_rand(0, 5);
+    look_tx = L[k][0]; look_ty = L[k][1];
+    g_nextLook = now + lv_rand(1600, 4200);
+  }
+  int dx = look_tx - look_cx, dy = look_ty - look_cy;
+  look_cx += (dx > 1 || dx < -1) ? dx / 2 : dx;
+  look_cy += (dy > 1 || dy < -1) ? dy / 2 : dy;
+  for (int i = 0; i < 2; i++) {
+    lv_obj_set_style_translate_x(pups[i], look_cx / 4, 0);
+    lv_obj_set_style_translate_y(pups[i], look_cy / 4, 0);
+  }
+
+  bool happy = now < g_happyUntil;
+  if (happy != g_happy) { g_happy = happy; apply_eyes(g_state, happy); }
+
+  if (g_state == UI_BUSY) {
+    int lit = (now / 260) % 4;
+    for (int i = 0; i < 3; i++) lv_obj_set_style_bg_color(dots3[i], C(i < lit ? ACC[UI_BUSY] : 0x2c3a62), 0);
+  }
+
+  if ((g_state == UI_IDLE || g_state == UI_ATTN) && now > g_nextTwitch) {
+    twitch_ear(lv_rand(0, 1) ? earL : earR);
+    g_nextTwitch = now + lv_rand(3500, 8500);
+  }
+}
+
+static void hero_tap_cb(lv_event_t*) {
+  if (g_state == UI_SLEEP) return;
+  g_happyUntil = lv_tick_get() + 900;
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, mas);
+  lv_anim_set_exec_cb(&a, anim_bounce);
+  lv_anim_set_values(&a, 0, -9);
+  lv_anim_set_duration(&a, 170);
+  lv_anim_set_reverse_duration(&a, 260);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
+}
+
 static void build_mascot(lv_obj_t* parent, int cx, int cy) {
   ring = lv_arc_create(parent);
-  lv_obj_set_size(ring, 76, 76);
-  lv_obj_set_pos(ring, cx - 38, cy - 38);
+  lv_obj_set_size(ring, 82, 82);
+  lv_obj_set_pos(ring, cx - 41, cy - 41);
   lv_arc_set_bg_angles(ring, 0, 360);
   lv_arc_set_angles(ring, 0, 360);
   lv_obj_remove_style(ring, NULL, LV_PART_KNOB);
@@ -209,30 +347,37 @@ static void build_mascot(lv_obj_t* parent, int cx, int cy) {
   lv_obj_set_style_arc_color(ring, C(0x1c2546), LV_PART_MAIN);
   lv_obj_set_style_arc_rounded(ring, true, LV_PART_INDICATOR);
 
-  earL = make_ear(parent, &ear_buf_l, true);
-  earR = make_ear(parent, &ear_buf_r, false);
-  lv_obj_set_pos(earL, cx - 21, cy - 27);
-  lv_obj_set_pos(earR, cx + 1,  cy - 27);
+  // everything that bounces when tapped lives in one container (local origin = (cx-48, cy-42))
+  mas = plain(parent, cx - 48, cy - 42, 96, 84);
+  lv_obj_remove_flag(mas, LV_OBJ_FLAG_CLICKABLE);
+  const int ox = 48, oy = 42;
 
-  head = plain(parent, cx - 24, cy - 16, 48, 40);
-  lv_obj_set_style_radius(head, 19, 0);
+  earL = make_ear(mas, &ear_buf_l, true);
+  earR = make_ear(mas, &ear_buf_r, false);
+  lv_obj_set_pos(earL, ox - 28, oy - 35);
+  lv_obj_set_pos(earR, ox + 4,  oy - 35);
+
+  head = plain(mas, ox - 29, oy - 20, 58, 48);
+  lv_obj_set_style_radius(head, 21, 0);
   lv_obj_set_style_bg_opa(head, LV_OPA_COVER, 0);
   lv_obj_set_style_bg_color(head, C(0x2b3868), 0);
   lv_obj_set_style_bg_grad_color(head, C(0x1a2347), 0);
   lv_obj_set_style_bg_grad_dir(head, LV_GRAD_DIR_VER, 0);
   lv_obj_set_style_border_width(head, 2, 0);
 
-  eyeL = make_eye(head, -10);
-  eyeR = make_eye(head, 10);
+  make_eye(head, 0, -11);
+  make_eye(head, 1, 11);
+  eyeL = eyes[0]; eyeR = eyes[1];
 
-  nose = plain(head, 0, 0, 5, 4);
+  nose = plain(head, 0, 0, 6, 4);
   lv_obj_set_style_radius(nose, 2, 0);
   lv_obj_set_style_bg_opa(nose, LV_OPA_COVER, 0);
   lv_obj_set_style_bg_color(nose, C(0xe98fb4), 0);
-  lv_obj_align(nose, LV_ALIGN_CENTER, 0, 6);
+  lv_obj_align(nose, LV_ALIGN_CENTER, 0, 8);
 
   mouth = lv_arc_create(head);
-  lv_obj_set_size(mouth, 16, 16);
+  mouth_o = mouth;
+  lv_obj_set_size(mouth, 18, 18);
   lv_arc_set_bg_angles(mouth, 30, 150);
   lv_arc_set_angles(mouth, 30, 150);
   lv_obj_remove_style(mouth, NULL, LV_PART_KNOB);
@@ -242,32 +387,41 @@ static void build_mascot(lv_obj_t* parent, int cx, int cy) {
   lv_obj_set_style_arc_opa(mouth, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_arc_color(mouth, C(0xeaf0ff), LV_PART_INDICATOR);
   lv_obj_set_style_arc_rounded(mouth, true, LV_PART_INDICATOR);
-  lv_obj_align(mouth, LV_ALIGN_CENTER, 0, 5);
+  lv_obj_align(mouth, LV_ALIGN_CENTER, 0, 6);
 
-  static const lv_point_precise_t wl1[] = {{0, 2}, {10, 0}};
-  static const lv_point_precise_t wl2[] = {{0, 0}, {10, 4}};
-  static const lv_point_precise_t wr1[] = {{0, 0}, {10, 2}};
-  static const lv_point_precise_t wr2[] = {{0, 4}, {10, 0}};
-  whiskers[0] = make_line(parent, wl1, 2, 1, 0x7e8cb8);
-  whiskers[1] = make_line(parent, wl2, 2, 1, 0x7e8cb8);
-  whiskers[2] = make_line(parent, wr1, 2, 1, 0x7e8cb8);
-  whiskers[3] = make_line(parent, wr2, 2, 1, 0x7e8cb8);
-  lv_obj_set_pos(whiskers[0], cx - 36, cy + 3);
-  lv_obj_set_pos(whiskers[1], cx - 36, cy + 9);
-  lv_obj_set_pos(whiskers[2], cx + 26, cy + 3);
-  lv_obj_set_pos(whiskers[3], cx + 26, cy + 9);
+  static const lv_point_precise_t wl1[] = {{0, 2}, {12, 0}};
+  static const lv_point_precise_t wl2[] = {{0, 0}, {12, 5}};
+  static const lv_point_precise_t wr1[] = {{0, 0}, {12, 2}};
+  static const lv_point_precise_t wr2[] = {{0, 5}, {12, 0}};
+  whiskers[0] = make_line(mas, wl1, 2, 1, 0x7e8cb8);
+  whiskers[1] = make_line(mas, wl2, 2, 1, 0x7e8cb8);
+  whiskers[2] = make_line(mas, wr1, 2, 1, 0x7e8cb8);
+  whiskers[3] = make_line(mas, wr2, 2, 1, 0x7e8cb8);
+  lv_obj_set_pos(whiskers[0], ox - 46, oy + 3);
+  lv_obj_set_pos(whiskers[1], ox - 46, oy + 10);
+  lv_obj_set_pos(whiskers[2], ox + 34, oy + 3);
+  lv_obj_set_pos(whiskers[3], ox + 34, oy + 10);
 
   badge_z = label(parent, "z Z", F14, 0x9fb0e0);
-  lv_obj_set_pos(badge_z, cx + 16, cy - 36);
+  lv_obj_set_pos(badge_z, cx + 20, cy - 40);
 
-  badge_bang = plain(parent, cx + 18, cy - 38, 18, 18);
+  badge_bang = plain(parent, cx + 24, cy - 42, 18, 18);
   lv_obj_set_style_radius(badge_bang, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_opa(badge_bang, LV_OPA_COVER, 0);
   lv_obj_set_style_bg_color(badge_bang, C(ACC[UI_ATTN]), 0);
   lv_obj_t* bl = label(badge_bang, "!", F14, 0x1a1200);
   lv_obj_center(bl);
 
-  lv_timer_create(blink_cb, 3800, NULL);
+  for (int i = 0; i < 3; i++) {
+    dots3[i] = dot(parent, cx + 26 + i * 8, cy - 38, 5, 0x2c3a62);
+    lv_obj_add_flag(dots3[i], LV_OBJ_FLAG_HIDDEN);
+  }
+
+  lv_obj_add_flag(hero, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(hero, hero_tap_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_timer_create(blink_cb, 3600, NULL);
+  lv_timer_create(mascot_tick, 50, NULL);
 }
 
 static void mascot_state(UiState s) {
@@ -275,31 +429,22 @@ static void mascot_state(UiState s) {
   lv_anim_delete(ring, anim_ring_rot);
   lv_anim_delete(ring, anim_ring_pulse);
   lv_anim_delete(badge_bang, anim_bg_pulse);
-  g_acc = ACC[s];
   lv_anim_delete(badge_z, anim_y_off);
+  lv_anim_delete(head, anim_y_off);
+  lv_anim_delete(head, anim_x_off);
+  lv_obj_set_style_translate_y(head, 0, 0);
+  lv_obj_set_style_translate_x(head, 0, 0);
+  g_acc = acc;
+
   lv_obj_set_style_arc_color(ring, C(acc), LV_PART_INDICATOR);
   lv_obj_set_style_border_color(head, C(acc), 0);
 
   bool sleep = s == UI_SLEEP, busy = s == UI_BUSY, attn = s == UI_ATTN;
   setFlag(badge_z, LV_OBJ_FLAG_HIDDEN, !sleep);
   setFlag(badge_bang, LV_OBJ_FLAG_HIDDEN, !attn);
+  for (int i = 0; i < 3; i++) setFlag(dots3[i], LV_OBJ_FLAG_HIDDEN, !busy);
 
-  // eyes
-  int ew = busy ? 11 : 8;
-  int eh = sleep ? 2 : busy ? 5 : attn ? 16 : 12;
-  lv_obj_set_size(eyeL, ew, eh);
-  lv_obj_set_size(eyeR, ew, eh);
-  uint32_t ec = busy ? acc : (sleep ? 0x8794bd : 0xeaf0ff);
-  lv_obj_set_style_bg_color(eyeL, C(ec), 0);
-  lv_obj_set_style_bg_color(eyeR, C(ec), 0);
-  lv_obj_align(eyeL, LV_ALIGN_CENTER, busy ? -9 : -10, sleep ? -2 : -3);
-  lv_obj_align(eyeR, LV_ALIGN_CENTER, busy ?  9 :  10, sleep ? -2 : -3);
-
-  // mouth
-  if (attn)       { lv_arc_set_bg_angles(mouth, 0, 360); lv_arc_set_angles(mouth, 0, 360); lv_obj_set_size(mouth, 9, 9); lv_obj_align(mouth, LV_ALIGN_CENTER, 0, 11); }
-  else if (sleep) { lv_arc_set_bg_angles(mouth, 60, 120); lv_arc_set_angles(mouth, 60, 120); lv_obj_set_size(mouth, 16, 16); lv_obj_align(mouth, LV_ALIGN_CENTER, 0, 6); }
-  else            { lv_arc_set_bg_angles(mouth, 30, 150); lv_arc_set_angles(mouth, 30, 150); lv_obj_set_size(mouth, 16, 16); lv_obj_align(mouth, LV_ALIGN_CENTER, 0, 5); }
-  lv_obj_set_style_arc_color(mouth, C(attn ? acc : 0xeaf0ff), LV_PART_INDICATOR);
+  apply_eyes(s, g_happy && !sleep);
 
   // ring + animation
   lv_anim_t a;
@@ -336,6 +481,15 @@ static void mascot_state(UiState s) {
     lv_anim_set_reverse_duration(&a, 450);
     lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
     lv_anim_start(&a);
+    // a short wiggle to get attention
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, head);
+    lv_anim_set_exec_cb(&a, anim_x_off);
+    lv_anim_set_values(&a, -2, 2);
+    lv_anim_set_duration(&a, 70);
+    lv_anim_set_reverse_duration(&a, 70);
+    lv_anim_set_repeat_count(&a, 8);
+    lv_anim_start(&a);
   }
   if (sleep) {
     lv_anim_init(&a);
@@ -347,6 +501,17 @@ static void mascot_state(UiState s) {
     lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
     lv_anim_start(&a);
   }
+  // breathing (slow, deep asleep) / typing bob (working)
+  if (!attn) {
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, head);
+    lv_anim_set_exec_cb(&a, anim_y_off);
+    lv_anim_set_values(&a, 0, sleep ? 2 : -1);
+    lv_anim_set_duration(&a, sleep ? 2600 : (busy ? 260 : 1900));
+    lv_anim_set_reverse_duration(&a, sleep ? 2600 : (busy ? 260 : 1900));
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_start(&a);
+  }
 
   // hero chrome
   for (int i = 0; i < 3; i++) lv_obj_set_style_opa(hero_dots[i], sleep ? LV_OPA_40 : LV_OPA_COVER, 0);
@@ -355,6 +520,74 @@ static void mascot_state(UiState s) {
   lv_obj_set_style_border_color(chip, C(acc), 0);
   lv_obj_set_style_text_color(chip_lbl, C(acc), 0);
   setText(chip_lbl, LBL[s]);
+}
+
+
+// ── Smooth value changes ───────────────────────────────────────────────────
+struct NumAnim { lv_obj_t* lbl; uint32_t cur, tgt; };
+static NumAnim n_tok_home, n_tok_stats;
+static void num_exec(void* v, int32_t x) {
+  NumAnim* n = (NumAnim*)v;
+  n->cur = (uint32_t)x;
+  char t[16]; fmtTok(t, sizeof t, n->cur);
+  setText(n->lbl, t);
+}
+static void setNum(NumAnim& n, uint32_t target) {
+  if (n.tgt == target) return;
+  n.tgt = target;
+  lv_anim_delete(&n, num_exec);
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, &n);
+  lv_anim_set_exec_cb(&a, num_exec);
+  lv_anim_set_values(&a, (int32_t)n.cur, (int32_t)target);
+  lv_anim_set_duration(&a, 700);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
+}
+
+struct SplitBar { lv_obj_t *u, *b; int su, sb, tu, tb, cu, cb; };
+static SplitBar sb_home, sb_stats;
+static void split_exec(void* v, int32_t p) {
+  SplitBar* s = (SplitBar*)v;
+  s->cu = s->su + (s->tu - s->su) * p / 256;
+  s->cb = s->sb + (s->tb - s->sb) * p / 256;
+  lv_obj_set_width(s->u, s->cu);
+  lv_obj_set_x(s->b, s->cu);
+  lv_obj_set_width(s->b, s->cb);
+}
+static void setSplit(SplitBar& s, int w, uint32_t u, uint32_t b) {
+  uint32_t t = u + b;
+  int tu = t ? (int)((uint64_t)u * w / t) : 0;
+  int tb = t ? w - tu : 0;
+  if (tu == s.tu && tb == s.tb) return;
+  s.su = s.cu; s.sb = s.cb; s.tu = tu; s.tb = tb;
+  lv_anim_delete(&s, split_exec);
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, &s);
+  lv_anim_set_exec_cb(&a, split_exec);
+  lv_anim_set_values(&a, 0, 256);
+  lv_anim_set_duration(&a, 600);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
+}
+
+struct WBar { lv_obj_t* o; int cur, tgt; };
+static WBar wb_allow, wb_deny;
+static void wbar_exec(void* v, int32_t x) { WBar* w = (WBar*)v; w->cur = x; lv_obj_set_width(w->o, x); }
+static void setWBar(WBar& w, int target) {
+  if (w.tgt == target) return;
+  w.tgt = target;
+  lv_anim_delete(&w, wbar_exec);
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, &w);
+  lv_anim_set_exec_cb(&a, wbar_exec);
+  lv_anim_set_values(&a, w.cur, target);
+  lv_anim_set_duration(&a, 500);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
 }
 
 // ── Pieces ─────────────────────────────────────────────────────────────────
@@ -401,14 +634,14 @@ static void build_home(lv_obj_t* tab) {
   static const uint32_t tl[3] = {0xff5f57, 0xffbd2e, 0x28c840};
   for (int i = 0; i < 3; i++) hero_dots[i] = dot(bar, 10 + i * 14, 7, 8, tl[i]);
   hero_title = label(bar, "starting", F12, COL_TEXT2);
-  lv_obj_set_width(hero_title, 150);
-  lv_label_set_long_mode(hero_title, LV_LABEL_LONG_DOT);
+  lv_obj_set_size(hero_title, 150, 14);
+  lv_label_set_long_mode(hero_title, LV_LABEL_LONG_CLIP);
   lv_obj_set_style_text_align(hero_title, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_align(hero_title, LV_ALIGN_CENTER, 14, 0);
 
-  build_mascot(hero, 112, 61);
+  build_mascot(hero, MS_CX, MS_CY);
 
-  chip = plain(hero, 62, 101, 100, 20);
+  chip = plain(hero, 62, 106, 100, 18);
   lv_obj_set_style_radius(chip, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_border_width(chip, 1, 0);
   chip_lbl = label(chip, "IDLE", F12, COL_TEXT);
@@ -431,6 +664,8 @@ static void build_home(lv_obj_t* tab) {
   tok_bar_b = plain(track, 0, 0, 0, 6);
   lv_obj_set_style_bg_opa(tok_bar_b, LV_OPA_COVER, 0);
   lv_obj_set_style_bg_color(tok_bar_b, C(COL_BLE), 0);
+  sb_home = {tok_bar_u, tok_bar_b, 0, 0, 0, 0, 0, 0};
+  n_tok_home = {tok_val, 0, 0};
 
   // activity
   lv_obj_t* act = card(tab, 8, 198, 224, 60);
@@ -439,8 +674,8 @@ static void build_home(lv_obj_t* tab) {
   for (int i = 0; i < 3; i++) {
     act_dots[i] = dot(act, 12, 22 + i * 13, 5, COL_DIM);
     act_rows[i] = label(act, "", F12, COL_TEXT);
-    lv_obj_set_width(act_rows[i], 190);
-    lv_label_set_long_mode(act_rows[i], LV_LABEL_LONG_DOT);
+    lv_obj_set_size(act_rows[i], 190, 14);
+    lv_label_set_long_mode(act_rows[i], LV_LABEL_LONG_CLIP);
     lv_obj_set_pos(act_rows[i], 24, 16 + i * 13);
   }
 }
@@ -470,6 +705,22 @@ static lv_obj_t* kv(lv_obj_t* c, int y, const char* k) {
   return vl;
 }
 
+static lv_obj_t *st_chart, *st_peak;
+static lv_chart_series_t* st_ser;
+static int32_t g_spark[UI_SPARK];
+
+static lv_obj_t* track_bar(lv_obj_t* c, int x, int y, int w, int h, uint32_t col) {
+  lv_obj_t* t = plain(c, x, y, w, h);
+  lv_obj_set_style_radius(t, h / 2, 0);
+  lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(t, C(0x0b1020), 0);
+  lv_obj_set_style_clip_corner(t, true, 0);
+  lv_obj_t* f = plain(t, 0, 0, 0, h);
+  lv_obj_set_style_bg_opa(f, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(f, C(col), 0);
+  return f;
+}
+
 static void build_stats(lv_obj_t* tab) {
   lv_obj_set_style_pad_all(tab, 0, 0);
   lv_obj_set_scroll_dir(tab, LV_DIR_VER);
@@ -479,9 +730,11 @@ static void build_stats(lv_obj_t* tab) {
   lv_obj_set_pos(h, 12, 8);
   st_tok = label(c, "0", F28, COL_TEXT);
   lv_obj_set_pos(st_tok, 12, 24);
+  n_tok_stats = {st_tok, 0, 0};
   st_life = label(c, "", F12, COL_DIM);
   lv_obj_align(st_life, LV_ALIGN_TOP_RIGHT, -12, 36);
   split_bar(c, 12, 62, 200, &st_bar_u, &st_bar_b);
+  sb_stats = {st_bar_u, st_bar_b, 0, 0, 0, 0, 0, 0};
   dot(c, 12, 79, 7, COL_USB);
   st_leg_u = label(c, "USB 0", F12, COL_TEXT);
   lv_obj_set_pos(st_leg_u, 24, 74);
@@ -489,11 +742,36 @@ static void build_stats(lv_obj_t* tab) {
   st_leg_b = label(c, "BLE 0", F12, COL_TEXT);
   lv_obj_set_pos(st_leg_b, 130, 74);
 
-  c = card(tab, 8, 104, 224, 66);
+  // tool calls per minute, last 30 minutes (from the hub)
+  c = card(tab, 8, 104, 224, 92);
+  h = label(c, LV_SYMBOL_PLAY " TOOL CALLS / MIN", F12, COL_TEXT2);
+  lv_obj_set_pos(h, 12, 8);
+  st_peak = label(c, "", F12, COL_DIM);
+  lv_obj_align(st_peak, LV_ALIGN_TOP_RIGHT, -12, 8);
+  st_chart = lv_chart_create(c);
+  lv_obj_set_pos(st_chart, 10, 26);
+  lv_obj_set_size(st_chart, 204, 46);
+  lv_chart_set_type(st_chart, LV_CHART_TYPE_BAR);
+  lv_chart_set_point_count(st_chart, UI_SPARK);
+  lv_chart_set_div_line_count(st_chart, 0, 0);
+  lv_chart_set_range(st_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 4);
+  lv_obj_set_style_bg_opa(st_chart, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(st_chart, 0, 0);
+  lv_obj_set_style_pad_all(st_chart, 0, 0);
+  lv_obj_set_style_pad_column(st_chart, 1, 0);
+  lv_obj_set_style_radius(st_chart, 2, LV_PART_ITEMS);
+  st_ser = lv_chart_add_series(st_chart, C(COL_USB), LV_CHART_AXIS_PRIMARY_Y);
+  lv_chart_set_ext_y_array(st_chart, st_ser, g_spark);
+  lv_obj_t* l = label(c, "30 min ago", F12, COL_DIM);
+  lv_obj_set_pos(l, 12, 74);
+  l = label(c, "now", F12, COL_DIM);
+  lv_obj_align(l, LV_ALIGN_TOP_RIGHT, -12, 74);
+
+  c = card(tab, 8, 202, 224, 66);
   h = label(c, LV_SYMBOL_PLAY " SESSIONS", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   dot(c, 12, 31, 7, COL_USB);
-  lv_obj_t* l = label(c, "Claude Code", F12, COL_TEXT);
+  l = label(c, "Claude Code", F12, COL_TEXT);
   lv_obj_set_pos(l, 24, 26);
   st_ses_u = label(c, "", F12, COL_TEXT2);
   lv_obj_align(st_ses_u, LV_ALIGN_TOP_RIGHT, -12, 26);
@@ -503,38 +781,32 @@ static void build_stats(lv_obj_t* tab) {
   st_ses_b = label(c, "", F12, COL_TEXT2);
   lv_obj_align(st_ses_b, LV_ALIGN_TOP_RIGHT, -12, 44);
 
-  c = card(tab, 8, 176, 224, 84);
+  c = card(tab, 8, 274, 224, 84);
   h = label(c, LV_SYMBOL_OK " DECISIONS", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   l = label(c, "Allow", F12, COL_TEXT);
   lv_obj_set_pos(l, 12, 26);
-  lv_obj_t* t1 = plain(c, 56, 29, 126, 8);
-  lv_obj_set_style_radius(t1, 4, 0); lv_obj_set_style_bg_opa(t1, LV_OPA_COVER, 0); lv_obj_set_style_bg_color(t1, C(0x0b1020), 0);
-  lv_obj_set_style_clip_corner(t1, true, 0);
-  st_allow_bar = plain(t1, 0, 0, 0, 8);
-  lv_obj_set_style_bg_opa(st_allow_bar, LV_OPA_COVER, 0); lv_obj_set_style_bg_color(st_allow_bar, C(COL_OK), 0);
+  st_allow_bar = track_bar(c, 56, 29, 126, 8, COL_OK);
+  wb_allow = {st_allow_bar, 0, 0};
   st_allow_n = label(c, "0", F12, COL_TEXT);
   lv_obj_align(st_allow_n, LV_ALIGN_TOP_RIGHT, -12, 26);
   l = label(c, "Deny", F12, COL_TEXT);
   lv_obj_set_pos(l, 12, 44);
-  lv_obj_t* t2 = plain(c, 56, 47, 126, 8);
-  lv_obj_set_style_radius(t2, 4, 0); lv_obj_set_style_bg_opa(t2, LV_OPA_COVER, 0); lv_obj_set_style_bg_color(t2, C(0x0b1020), 0);
-  lv_obj_set_style_clip_corner(t2, true, 0);
-  st_deny_bar = plain(t2, 0, 0, 0, 8);
-  lv_obj_set_style_bg_opa(st_deny_bar, LV_OPA_COVER, 0); lv_obj_set_style_bg_color(st_deny_bar, C(COL_BAD), 0);
+  st_deny_bar = track_bar(c, 56, 47, 126, 8, COL_BAD);
+  wb_deny = {st_deny_bar, 0, 0};
   st_deny_n = label(c, "0", F12, COL_TEXT);
   lv_obj_align(st_deny_n, LV_ALIGN_TOP_RIGHT, -12, 44);
   st_rate = label(c, "Allow rate  --", F12, COL_TEXT2);
   lv_obj_set_pos(st_rate, 12, 62);
 
-  c = card(tab, 8, 266, 224, 84);
+  c = card(tab, 8, 364, 224, 84);
   h = label(c, LV_SYMBOL_SETTINGS " SYSTEM", F12, COL_TEXT2);
   lv_obj_set_pos(h, 12, 8);
   st_dev  = kv(c, 26, "Device");
   st_link = kv(c, 40, "Link");
   st_up   = kv(c, 54, "Uptime");
   st_beat = kv(c, 68, "Last beat");
-  lv_obj_t* pad = plain(tab, 8, 350, 1, 8);
+  lv_obj_t* pad = plain(tab, 8, 450, 1, 8);
   (void)pad;
 }
 
@@ -579,7 +851,6 @@ static lv_obj_t* big_button(lv_obj_t* parent, const char* txt, int x, int y, int
   return b;
 }
 
-static void anim_shadow(void* o, int32_t v) { lv_obj_set_style_shadow_width((lv_obj_t*)o, v, 0); }
 
 static void build_attn(void) {
   ov_attn = plain(lv_layer_top(), 0, 0, 240, 320);
@@ -612,8 +883,8 @@ static void build_attn(void) {
   lv_obj_t* tl = label(at_card, "TOOL", F12, COL_TEXT2);
   lv_obj_set_pos(tl, 16, 44);
   at_tool = label(at_card, "", F28, COL_TEXT);
-  lv_obj_set_width(at_tool, 180);
-  lv_label_set_long_mode(at_tool, LV_LABEL_LONG_DOT);
+  lv_obj_set_size(at_tool, 180, 34);
+  lv_label_set_long_mode(at_tool, LV_LABEL_LONG_CLIP);
   lv_obj_set_pos(at_tool, 16, 58);
 
   lv_obj_t* box = plain(at_card, 14, 98, 184, 50);
@@ -624,7 +895,7 @@ static void build_attn(void) {
   lv_obj_set_style_border_color(box, C(COL_BORDER), 0);
   at_hint = label(box, "", F12, 0xa7e8c0);
   lv_obj_set_width(at_hint, 168);
-  lv_label_set_long_mode(at_hint, LV_LABEL_LONG_DOT);
+  lv_label_set_long_mode(at_hint, LV_LABEL_LONG_WRAP);
   lv_obj_set_height(at_hint, 36);
   lv_obj_set_pos(at_hint, 8, 7);
 
@@ -644,8 +915,9 @@ static lv_obj_t* link_row(lv_obj_t* parent, int y, const char* sym, uint32_t col
   lv_obj_t* t = label(c, title, F14, COL_TEXT);
   lv_obj_set_pos(t, 44, 6);
   lv_obj_t* s = label(c, sub, F12, COL_TEXT2);
-  lv_obj_set_width(s, 164);
-  lv_label_set_long_mode(s, LV_LABEL_LONG_DOT);
+  lv_obj_set_size(s, 164, 14);
+  lv_label_set_long_mode(s, LV_LABEL_LONG_CLIP);
+  clipText(s, sub, 164);
   lv_obj_set_pos(s, 44, 25);
   return c;
 }
@@ -773,7 +1045,7 @@ void ui_update(const UiModel& m) {
 
   // hero
   const char* title = m.msg[0] ? m.msg : (st == UI_SLEEP ? "no activity" : "idle");
-  setText(hero_title, title);
+  clipText(hero_title, title, 150);
 
   // strip
   uint8_t run = (m.usbLive ? m.run[0] : 0) + (m.bleConn ? m.run[1] : 0);
@@ -785,31 +1057,49 @@ void ui_update(const UiModel& m) {
   srcs(run_u, run_b, m.usbLive ? m.run[0] : 0, m.bleConn ? m.run[1] : 0);
   srcs(wait_u, wait_b, m.usbLive ? m.wait[0] : 0, m.bleConn ? m.wait[1] : 0);
   uint32_t tokTotal = m.tok[0] + m.tok[1];
-  fmtTok(t, sizeof t, tokTotal); setText(tok_val, t);
-  split(tok_bar_u, tok_bar_b, 56, m.tok[0], m.tok[1]);
+  setNum(n_tok_home, tokTotal);
+  setSplit(sb_home, 56, m.tok[0], m.tok[1]);
 
   // activity
   static const uint32_t fade[3] = {COL_TEXT, 0xaab4d6, COL_DIM};
   for (int i = 0; i < 3; i++) {
     bool has = i < m.nEntries;
-    setText(act_rows[i], has ? m.entries[i] : (i == 0 ? "nothing yet" : ""));
+    clipText(act_rows[i], has ? m.entries[i] : (i == 0 ? "nothing yet" : ""), 190);
     lv_obj_set_style_text_color(act_rows[i], C(has ? fade[i] : COL_DIM), 0);
     lv_obj_set_style_bg_color(act_dots[i], C(has ? (i == 0 ? ACC[st] : COL_DIM) : 0x1c2546), 0);
   }
 
   // stats tab
-  fmtTok(t, sizeof t, tokTotal); setText(st_tok, t);
+  setNum(n_tok_stats, tokTotal);
   if (m.tokLife) { fmtTok(t2, sizeof t2, m.tokLife); snprintf(t, sizeof t, "lifetime %s", t2); setText(st_life, t); }
   fmtTok(t2, sizeof t2, m.tok[0]); snprintf(t, sizeof t, "USB  %s", t2); setText(st_leg_u, t);
   fmtTok(t2, sizeof t2, m.tok[1]); snprintf(t, sizeof t, "BLE  %s", t2); setText(st_leg_b, t);
-  split(st_bar_u, st_bar_b, 200, m.tok[0], m.tok[1]);
+  setSplit(sb_stats, 200, m.tok[0], m.tok[1]);
   snprintf(t, sizeof t, "run %u  wait %u", m.usbLive ? m.run[0] : 0, m.usbLive ? m.wait[0] : 0);
   setText(st_ses_u, m.usbLive ? t : "not linked");
   snprintf(t, sizeof t, "run %u  wait %u", m.bleConn ? m.run[1] : 0, m.bleConn ? m.wait[1] : 0);
   setText(st_ses_b, m.bleConn ? t : "not linked");
   uint32_t tot = m.approvals + m.denials;
-  lv_obj_set_width(st_allow_bar, tot ? (int)((uint64_t)m.approvals * 126 / tot) : 0);
-  lv_obj_set_width(st_deny_bar, tot ? (int)((uint64_t)m.denials * 126 / tot) : 0);
+  setWBar(wb_allow, tot ? (int)((uint64_t)m.approvals * 126 / tot) : 0);
+  setWBar(wb_deny, tot ? (int)((uint64_t)m.denials * 126 / tot) : 0);
+
+  // activity chart
+  {
+    int32_t peak = 0;
+    int off = UI_SPARK - m.nSpark;
+    bool changed = false;
+    for (int i = 0; i < UI_SPARK; i++) {
+      int32_t v = i >= off ? m.spark[i - off] : 0;
+      if (g_spark[i] != v) { g_spark[i] = v; changed = true; }
+      if (v > peak) peak = v;
+    }
+    if (changed) {
+      lv_chart_set_range(st_chart, LV_CHART_AXIS_PRIMARY_Y, 0, peak < 4 ? 4 : peak);
+      lv_chart_refresh(st_chart);
+      snprintf(t, sizeof t, "peak %ld", (long)peak);
+      setText(st_peak, t);
+    }
+  }
   snprintf(t, sizeof t, "%u", m.approvals); setText(st_allow_n, t);
   snprintf(t, sizeof t, "%u", m.denials);   setText(st_deny_n, t);
   if (tot) snprintf(t, sizeof t, "Allow rate  %u%%", (unsigned)(m.approvals * 100 / tot));
@@ -839,7 +1129,7 @@ void ui_update(const UiModel& m) {
   // attention overlay
   bool attn = online && st == UI_ATTN;
   if (attn) {
-    setText(at_tool, m.pTool[0] ? m.pTool : "Tool");
+    clipText(at_tool, m.pTool[0] ? m.pTool : "Tool", 180);
     snprintf(t, sizeof t, "%s", m.pHint);
     setText(at_hint, t[0] ? t : m.pId);
     setFlag(at_note, LV_OBJ_FLAG_HIDDEN, !m.pInfo);

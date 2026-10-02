@@ -51,6 +51,8 @@ class Hub:
         self.tokens_today = 0
         self.day = date.today()
         self.rev = 0                       # bumped on every accepted event
+        self.calls = deque(maxlen=6000)    # timestamps of tool calls, for the activity chart
+        self.resync = threading.Event()    # device just booted: resend the clock and a heartbeat
         self.device = {'connected': False, 'port': None, 'last_send': 0, 'last_rx': 0}
 
     # ── events from hooks ────────────────────────────────────────────────
@@ -79,6 +81,7 @@ class Hub:
                 hint = str(ev.get('hint', ''))[:43]
                 s['turn'] = True
                 s['prompt'] = None
+                self.calls.append(ts)
                 s['tools'][str(ev.get('id') or f'{tool}-{ts}')] = (tool, ts)
                 s['last_tool'] = (tool, hint)
                 self._entry(ts, f'{tool} {hint}'.strip(), s)
@@ -161,6 +164,13 @@ class Hub:
                 p = max(waiting, key=lambda s: s['prompt']['ts'])['prompt']
                 hb['prompt'] = {k: p[k] for k in ('id', 'tool', 'hint', 'info')}
             hb['msg'] = hb['msg'][:47]
+            # tool calls per minute over the last 30 minutes, oldest first
+            spark = [0] * 30
+            for t in self.calls:
+                age = ts - t
+                if 0 <= age < 1800:
+                    spark[29 - int(age // 60)] += 1
+            hb['spark'] = [min(v, 99) for v in spark]
             return hb
 
     def debug(self):
@@ -262,6 +272,7 @@ def reader(ser, stop):
                 log(f"device: {msg.get('decision')} -> {msg.get('id')}")
             elif 'hello' in msg:
                 log(f"device up: {msg.get('name')}")
+                HUB.resync.set()
         buf = buf[-2048:]
 
 
@@ -294,6 +305,10 @@ def serial_loop(pref):
             last_rev, last_send, last_time = -1, 0.0, now()
             while True:
                 t = now()
+                if HUB.resync.is_set():
+                    HUB.resync.clear()
+                    write_line(ser, {'time': [int(t), tz]})
+                    last_time, last_rev = t, -1
                 hb = HUB.snapshot()
                 with HUB.lock:
                     rev = HUB.rev

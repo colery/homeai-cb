@@ -103,6 +103,7 @@ struct Buddy {
   char msg[64] = ""; char entries[UI_ENTRIES][52] = {}; uint8_t nEntries = 0;
   char pId[40] = "", pTool[20] = "", pHint[44] = ""; bool pInfo = false;
   uint16_t approvals = 0, denials = 0;
+  uint8_t spark[UI_SPARK] = {}; uint8_t nSpark = 0;
   uint32_t epoch = 0, epochAt = 0; int32_t tzOff = 0;
 } g;
 enum BS { S_SLEEP, S_IDLE, S_BUSY, S_ATTN };
@@ -181,6 +182,12 @@ static void parseLine(const char* line, bool usb = false) {
     for (JsonVariant v : ea) { if (g.nEntries >= UI_ENTRIES) break; strncpy(g.entries[g.nEntries], v.as<const char*>(), 51); g.entries[g.nEntries++][51] = 0; }
   }
 
+  JsonArray sp = doc["spark"].as<JsonArray>();
+  if (!sp.isNull()) {
+    g.nSpark = 0;
+    for (JsonVariant v : sp) { if (g.nSpark >= UI_SPARK) break; int n = v.as<int>(); g.spark[g.nSpark++] = n < 0 ? 0 : n > 255 ? 255 : n; }
+  }
+
   JsonObject p = doc["prompt"].as<JsonObject>();
   if (!p.isNull()) {
     const char* pid = p["id"] | "";
@@ -214,7 +221,7 @@ static void onDismiss() {
 }
 
 // ── LVGL glue ──────────────────────────────────────────────────────────────
-static uint8_t lvBuf1[SCR_W * 40 * 2], lvBuf2[SCR_W * 40 * 2];
+static uint8_t lvBuf1[SCR_W * 24 * 2], lvBuf2[SCR_W * 24 * 2];   // small stripes: LVGL layers (rounded clips) are sized by the stripe
 
 static uint32_t flushes = 0;
 static void flushCb(lv_display_t* d, const lv_area_t* a, uint8_t* px) {
@@ -258,6 +265,7 @@ static void fillModel() {
   um.logCount = logTotal;
   for (int i = 0; i < logTotal; i++) um.logLines[i] = log_buf[(logI - 1 - i + LOG_N * 2) % LOG_N];
   um.logSeq = logSeq;
+  um.nSpark = g.nSpark; memcpy(um.spark, g.spark, sizeof um.spark);
 }
 
 // ── BLE init ───────────────────────────────────────────────────────────────
@@ -283,6 +291,28 @@ static void initBLE() {
   adv->addServiceUUID(BLEUUID(NUS_SVC)); adv->setScanResponse(true);
   adv->setMinPreferred(0x06); adv->setMaxPreferred(0x12);
   BLEDevice::startAdvertising();
+}
+
+// Debug: if loop() stops advancing, dump the stalled task's saved PC and code-looking stack words.
+static volatile uint32_t loopTicks = 0;
+static void samplerTask(void*) {
+  uint32_t last = 0; int stuck = 0;
+  for (;;) {
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    if (loopTicks == last) {
+      if (++stuck == 5) {
+        TaskHandle_t h = xTaskGetHandle("loopTask");
+        vTaskSuspend(h);
+        uint32_t* sp = *(uint32_t**)h;
+        Serial.printf("# STUCK pc=0x%08x a0=0x%08x\n", sp[1], sp[3]);
+        for (int i = 0; i < 400; i++) {
+          uint32_t w = sp[i];
+          if ((w >= 0x400D0000 && w < 0x40400000) || (w >= 0x40080000 && w < 0x400A0000)) Serial.printf("# w%d=0x%08x\n", i, w);
+        }
+        vTaskResume(h);
+      }
+    } else { stuck = 0; last = loopTicks; }
+  }
 }
 
 // ── Arduino ────────────────────────────────────────────────────────────────
@@ -320,11 +350,13 @@ void setup() {
 
   ui_init(onPermission, onDismiss);
   Serial.printf("# ui_init ok heap=%u max=%u\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+  xTaskCreatePinnedToCore(samplerTask, "samp", 4096, NULL, 1, NULL, 0);
   enableLoopWDT();   // a stall prints a backtrace and reboots instead of hanging silently
   Serial.printf("\n{\"hello\":\"claude-buddy\",\"name\":\"%s\"}\n", devName);
 }
 
 void loop() {
+  loopTicks++;
   feedLoopWDT();
   uint32_t now = millis();
 
@@ -358,7 +390,7 @@ void loop() {
   if (now - lastUi >= 80) { lastUi = now; fillModel(); ui_update(um); }
 
   static uint32_t lastDbg = 0;
-  if (now - lastDbg > 3000) { lastDbg = now; Serial.printf("# alive t=%lus flushes=%lu heap=%u min=%u\n", (unsigned long)(now / 1000), (unsigned long)flushes, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap()); }
+  if (now - lastDbg > 10000) { lastDbg = now; Serial.printf("# alive t=%lus flushes=%lu heap=%u min=%u\n", (unsigned long)(now / 1000), (unsigned long)flushes, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap()); }
   uint32_t wait = lv_timer_handler();
   delay(wait > 10 ? 10 : (wait ? wait : 1));
 }
