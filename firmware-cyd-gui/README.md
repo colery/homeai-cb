@@ -11,7 +11,7 @@ is different.
   (output in `preview/out/`, `sheet.png` is a contact sheet). Use this to check layout without a board.
 
 Build: `pio run -e cyd` (original ILI9341 board) or `-e cyd_new` (ILI9342 variant). Flash with
-`deploy/flash.sh`-style esptool, or on the hub host `~/claude-buddy/flash-gui.sh cyd`.
+`deploy/flash-gui.sh` on the hub host (see the top-level README for staging the binaries).
 Needs the `huge_app` partition table (set in platformio.ini); the default one is too small.
 
 Memory notes (learned the hard way): with BLE running only ~50 KB of heap is left, so

@@ -1,139 +1,38 @@
 # Claude Buddy — Handoff
 
-## What this is
-A physical Claude Desktop companion device. An ESP32 microcontroller with a display pairs over BLE to Claude Desktop and shows live session state with animations, and lets the user approve/deny tool permission prompts by touching the screen.
+Setup and usage are in `README.md`. This file is the state of play for whoever picks it up next.
 
-Based on: https://github.com/anthropics/claude-desktop-buddy
+## Where things run (as of 2026-10-02)
 
----
+- **Board:** original CYD (ESP32-2432S028, ILI9341), USB-C into the **AM21** (`100.64.149.28`, appears as `/dev/ttyUSB0`, CH340). Device name `Claude-E72E`. Running the LVGL GUI firmware (`firmware-cyd-gui`, `cyd` env).
+- **Hub:** `bridge.py` as the `claude-buddy` systemd service on the AM21 (code in `~/claude-buddy`, `:8765`). Flash scripts live there too (`flash.sh` old UI, `flash-gui.sh` GUI; staged firmware in `~/claude-buddy/fw/` and `fw-gui/`).
+- **Claude Code hooks:** registered in `~/.claude/settings.json` on the **Acer**; status line forwards plan usage (`~/.claude/statusline-command.sh`, original saved as `.bak-buddy-20261002`). Not set up on other machines.
+- **Claude Desktop:** the MacBook, over Bluetooth. A different Claude account from the Acer's Claude Code, by design — which is why the `B` bar shows tokens, not plan usage.
+- A copy of this project also exists at `~/claude-buddy` on the Optiplex (old, ignore it).
 
-## Hardware currently in use
-- **Board A — Original CYD** (ESP32-2432S028): 2.8" **ILI9341** 240×320 + XPT2046 resistive touch, RGB LEDs. Flash with `[env:cyd]`.
-- **Board B — New variant** (TPM408-2.8 / Amazon A2150 / X004QKM5EP): 2.8" **ILI9342** panel mounted 90° off. Uses `[env:cyd_new]`. Requires `ILI9342_DRIVER` + `TFT_WIDTH=320,TFT_HEIGHT=240` to address the full panel.
-- **Secondary: M5StickC original** — 80×160 LCD, BLE, two physical buttons (Linux/Claude Code mode only).
+## Design decisions worth knowing
 
----
+- **Two sources, kept separate.** Everything is tracked per source (index 0 = USB/Claude Code, 1 = BLE/Claude Desktop): running, waiting, tokens, status text, activity. Mixing them into one set of counters made the numbers flicker between sources.
+- **`U` bar = plan usage** (Claude Code status line `rate_limits.five_hour`), **`B` bar = Bluetooth tokens today vs best day** (best day persisted in the board's flash, 100K floor). Claude Desktop sends no plan usage over BLE. The hub also supports per-host usage (`BUDDY_U_HOSTS`, hosts outside it feed a `limits.b` field) but the UI doesn't use it.
+- **Claude Code permission prompts are display-only** (the hook just sees a `Notification`); only Claude Desktop prompts can be answered from the board. Idea: a `PermissionRequest` hook can return a decision, so the hub could hold the request until the board answers.
+- **Everything in progress expires in the hub** (thinking 120 s, tool 10 min, prompt 10 min, session 1 h), so an interrupted turn can't leave it stuck on WORKING.
+- **Token counting:** the hook sums each session's transcript growth at `Stop` (input + output + cache writes). A session that predates the hook starts counting from its first `Stop`.
 
-## Current state
+## Things that bit us (don't relearn them)
 
-### What's working (original CYD board)
-- BLE pairing with Claude Desktop (Nordic UART Service, `Claude-XXYY` advertising name)
-- CYD: dark sci-fi HUD — animated ASCII cat with pulsing glow rings, state-reactive neon accent color (cyan/green/amber/gray), corner-bracket panels, glowing separators, fading activity feed, 3-tab navigation (swipe or tap)
-- M5StickC: landscape buddy with cat animation and button A/B approve/deny
-- State machine: SLEEPING → IDLE → WORKING → APPROVE?
-- `evt:turn` handling shows WORKING during user→assistant message exchange (bridges gap where `running` isn't set for plain chat)
-- Permission prompt: correctly persists until explicitly cleared, not wiped by unrelated heartbeats
-- Touch left/right for Don't Allow/Allow (correct mapping, tested)
-- Permission sends logged to BLE LOG tab for verification
-- LED: blinks red in APPROVE? state, pulses green while connected
-- Approval/denial tally tracked and displayed
-- Clock displayed from Claude Desktop time-sync
-- LOG tab: scrollable live BLE data stream, shows exactly what Claude Desktop sends
+- **Heap:** with BLE running ~50 KB is free. Release classic-BT RAM before BLE init; keep LVGL render stripes at 24 lines; never fade object opacity (allocates a layer; froze the UI inside `malloc`).
+- **LVGL on ESP32:** `LV_LABEL_LONG_DOT` loops forever at render time (fine on the host!) — clip text manually (`clipText` in `ui.cpp`). `pushPixelsDMA` flushing hung after ~3 s — still blocking, ~110 flushes/s.
+- **Host preview doesn't catch everything:** the zero-data and memory cases only show up on the board. Use the serial debug lines (`# alive … heap=…`) and the watchdog's stuck-PC dump.
+- **Opening the serial port resets the board** (DTR/RTS), so restarting the hub reboots it; the hub resends the clock on the board's `hello`.
+- **macOS pairing:** removing the device in Claude Desktop leaves the Mac's Bluetooth pairing in place and blocks reconnecting — forget it in System Settings too. The board's passkey screen must show even with USB linked (it does).
+- **LVGL config:** the template's enable guard is `#if 0 /* Set this to "1" to enable content */`; if it isn't flipped, `lv_conf.h` is silently ignored (default fonts, "undefined reference" link errors). Delete stale `.o` files after changing it.
+- A TN panel looks washed out off-axis; photos taken at an angle exaggerate it.
 
-### Flicker — solved
-Three-tier render: full redraw only on state/tab change → `updateBuddyText()` for data-only changes → sprite-only push for animation. DMA + 40 MHz SPI + `startWrite`/`endWrite` batching. Full redraws use gap fills instead of `fillScreen`.
+## Open items / ideas
 
-### Open question
-Claude Desktop only sets `running > 0` for tool-assisted sessions, not plain chat. The LOG tab on the CYD shows every raw BLE line — a photo of it during active use will reveal exactly what the user's Claude Desktop version sends. Once known, `parseLine()` can be updated if needed.
-
----
-
-## New Board — Resolved
-
-**Board B** (TPM408-2.8 / Amazon A2150) uses an **ILI9342** controller (not ILI9341). The ILI9341 driver only addressed 75% of the panel; switching to ILI9342 with `TFT_WIDTH=320, TFT_HEIGHT=240` gives correct full-panel access. With those dimensions, `setRotation(3)` produces the correct portrait right-side-up orientation and full 240×320 layout.
-
-The `#define NEW_BOARD` flag is injected at build time — no source file edits needed to switch boards.
-
----
-
-## Flashing — Board A (Original CYD / ESP32-2432S028 / ILI9341)
-```bash
-sudo chmod 666 /dev/ttyUSB0
-cd firmware-cyd
-pio run -e cyd --target upload --upload-port /dev/ttyUSB0
-```
-- Driver: `ILI9341_DRIVER`, `TFT_WIDTH=240`, `TFT_HEIGHT=320`
-- Rotation: `setRotation(0)` — portrait, full 240×320
-
-## Flashing — Board B (TPM408-2.8 / A2150 / ILI9342)
-```bash
-sudo chmod 666 /dev/ttyUSB0
-cd firmware-cyd
-pio run -e cyd_new --target upload --upload-port /dev/ttyUSB0
-```
-- Driver: `ILI9342_DRIVER`, `TFT_WIDTH=320`, `TFT_HEIGHT=240`
-- Rotation: `setRotation(3)` — portrait right-side-up, full 240×320
-- Both environments share the same `firmware-cyd/src/main.cpp`. The `cyd_new` environment injects `-DNEW_BOARD` which activates the rotation-3 + ILI9342 path.
-
----
-
-## Architecture
-
-```
-Claude Desktop (macOS/Windows)
-       │  BLE Nordic UART Service (NUS)
-       │  RX (6e400002): heartbeat JSON from Desktop → device
-       │  TX (6e400003): permission decisions from device → Desktop
-       ▼
-  CYD firmware (firmware-cyd/src/main.cpp)
-       • parseLine()  — JSON protocol handler
-       • recompute()  — state machine (SLEEP/IDLE/BUSY/ATTN)
-       • pushCatSprite() — 240×148 TFT_eSprite, atomic DMA push
-       • dirty / textDirty flags — control render tier
-       • swipe + tap touch handling
-```
-
-For **Linux + Claude Code** (no Claude Desktop):
-```
-Claude Code CLI (any machine)
-  → hooks/buddy_hook.py POSTs events to the hub (bridge.py, :8765, runs on the AM21)
-  → hub keeps per-session state with expiry, pushes heartbeats over USB serial
-  → CYD (firmware-cyd reads USB serial since Oct 2026) or M5StickC; same JSON protocol as BLE
-```
-
----
-
-## Key files
-
-| Path | Purpose |
-|------|---------|
-| `firmware-cyd/src/main.cpp` | CYD BLE firmware — all display, touch, BLE, protocol |
-| `firmware-cyd/platformio.ini` | esp32dev, TFT_eSPI, XPT2046, ArduinoJson, 40MHz DMA |
-| `firmware/src/main.cpp` | M5StickC BLE firmware |
-| `firmware/platformio.ini` | m5stick-c board |
-| `bridge.py` | Hub: HTTP in from hooks, per-session state, USB serial out |
-| `deploy/` | `claude-buddy.service` (hub on the AM21), `flash.sh` |
-| `hooks/buddy_hook.py` | Claude Code hook for all events -> hub (never blocks/breaks Claude Code) |
-| `README.md` | Full setup, protocol, and troubleshooting docs |
-
----
-
-## Key implementation notes
-
-**BLE security**: `ESP_LE_AUTH_REQ_SC_MITM_BOND` + `ESP_IO_CAP_OUT` (DisplayOnly). Auth callback sets `bleSec=true`; 3-second fallback timer handles already-bonded reconnects where the callback may not fire.
-
-**Characteristic permissions**: NOT using `ESP_GATT_PERM_WRITE_ENCRYPTED` on the RX characteristic — this was found to block Claude Desktop writes in testing.
-
-**Prompt clearing**: only clears `g.pId/pTool/pHint` when a heartbeat explicitly sends `waiting: 0`, not when arbitrary messages arrive without a `prompt` field.
-
-**Touch**: `startState` captured at touch-down to avoid race where state changes mid-touch and the tap handler sees the wrong state.
-
-**Sprite**: 240×148 px, covers the entire hero zone y=19-166. `catSpr.fillSprite(BG)` + glow rings + cat text + `catSpr.pushSprite()` — the push is one atomic SPI transaction via DMA.
-
-**Render tiers**:
-1. `dirty=true` (state or tab changed) → full redraw with `startWrite`/`endWrite`
-2. `textDirty=true` (same state, data changed) → `updateBuddyText()` + `pushCatSprite()`
-3. Animation tick (700ms) → `pushCatSprite()` + clock update only
-
-**PlatformIO**: `~/.platformio/penv/bin/pio`. Always `sudo chmod 666 /dev/ttyUSB0` before flashing on this system (or `./stop.sh` if bridge is running first).
-
----
-
-## Next steps (in priority order)
-
-1. **New board layout redesign** — fix coordinate mismatch for new CYD/BYD variant: use `setRotation(3)` + redesign all draw coordinates for 320w×240h logical space (see "New Board Issue" above)
-2. **Verify permission flow end-to-end** — confirm a tool approval from the CYD actually unblocks Claude Desktop
-3. **Protocol investigation** — use the LOG tab to photograph what Claude Desktop sends during active use
-4. **Push updated firmware to GitHub** — current firmware-cyd/src/main.cpp not yet pushed to colery/homeai-cb
-5. **Auto-start on USB** (Linux) — udev rule to start `bridge.py` when M5StickC is plugged in
-6. **GIF character support** (optional) — upstream repo's folder-push protocol for streaming custom animated characters over BLE
+1. Confirm the `cyd_new` (ILI9342) GUI build on the real board — it compiles, untested on hardware.
+2. Smoother animation: find why the DMA flush hangs, or keep blocking and lower the animation rate.
+3. Approving Claude Code permissions from the board (see above).
+4. Plan usage for the Bluetooth/Mac account would need Claude Code on that machine with the same status-line forward; Desktop alone can't provide it.
+5. Optional backlight dimming when asleep (deliberately not done).
+6. `firmware/` (M5StickC) is legacy and not connected to the hub.
